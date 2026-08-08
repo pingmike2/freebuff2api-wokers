@@ -343,6 +343,29 @@ function responsesToChatParams(params, mc) {
     chat.response_format = { type: params.text.format.type };
     if (params.text.format.json_schema) chat.response_format.json_schema = params.text.format.json_schema;
   }
+  // Responses 工具格式（扁平 function）→ chat completions 格式（function 包装）
+  if (Array.isArray(params.tools)) {
+    chat.tools = params.tools
+      .map((t) => {
+        if (!t || typeof t !== "object") return null;
+        if (t.type === "function") {
+          return {
+            type: "function",
+            function: {
+              name: t.name || "",
+              description: t.description || "",
+              parameters: t.parameters || { type: "object", properties: {} },
+            },
+          };
+        }
+        return t;
+      })
+      .filter(Boolean);
+  }
+  // Responses tool_choice（{type:"function",name}）→ chat 格式
+  if (params.tool_choice && typeof params.tool_choice === "object" && params.tool_choice.type === "function" && params.tool_choice.name) {
+    chat.tool_choice = { type: "function", function: { name: params.tool_choice.name } };
+  }
   chat.model = mc.id;
   chat.messages = responsesInputToMessages(params.input, params.instructions);
   return chat;
@@ -595,16 +618,45 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc) {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   const respId = "resp_" + Math.random().toString(36).slice(2, 10);
-  const itemId = "msg_" + Math.random().toString(36).slice(2, 10);
-  const outputIndex = 0, contentIndex = 0;
-  let buf = "", outputText = "", model = "";
+  let buf = "", model = "";
   const send = (obj) => writer.write(encoder.encode("data: " + JSON.stringify(obj) + "\n\n"));
+
+  // 按上游出现顺序记录输出项：message（文本）或 function_call（工具调用）
+  const items = [];
+  let nextOutputIndex = 0;
+  let contentItem = null;
+  const toolItems = new Map(); // 上游 tool_calls index → 输出项
+
+  const startContent = () => {
+    const item = {
+      kind: "message",
+      id: "msg_" + Math.random().toString(36).slice(2, 10),
+      outputIndex: nextOutputIndex++,
+      text: "",
+      contentIndex: 0,
+      started: false,
+    };
+    items.push(item);
+    return item;
+  };
+  const startTool = (tc) => {
+    const fn = tc.function || {};
+    const item = {
+      kind: "function_call",
+      id: "fc_" + Math.random().toString(36).slice(2, 10),
+      outputIndex: nextOutputIndex++,
+      callId: tc.id || "call_" + Math.random().toString(36).slice(2, 10),
+      name: fn.name || "",
+      args: "",
+    };
+    items.push(item);
+    return item;
+  };
+
   (async () => {
     try {
       await send({ type: "response.created", response: responsesBase(mc, respId) });
       await send({ type: "response.in_progress", response: responsesBase(mc, respId) });
-      await send({ type: "response.output_item.added", output_index: outputIndex, item: { id: itemId, type: "message", status: "in_progress", role: "assistant", content: [] } });
-      await send({ type: "response.content_part.added", item_id: itemId, output_index: outputIndex, content_index: contentIndex, part: { type: "output_text", text: "", annotations: [] } });
 
       while (true) {
         const { done, value } = await reader.read();
@@ -621,24 +673,75 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc) {
             const choice = obj?.choices?.[0];
             if (!choice) continue;
             const delta = choice.delta || {};
-            if (delta.content) {
-              outputText += delta.content;
-              await send({ type: "response.output_text.delta", item_id: itemId, output_index: outputIndex, content_index: contentIndex, delta: delta.content });
-            }
             if (obj.model) model = obj.model;
+
+            // 工具调用增量（chat 格式 delta.tool_calls[]）
+            if (Array.isArray(delta.tool_calls)) {
+              for (const tc of delta.tool_calls) {
+                if (!tc || typeof tc !== "object") continue;
+                const ti = tc.index ?? 0;
+                let item = toolItems.get(ti);
+                if (!item) {
+                  item = startTool(tc);
+                  toolItems.set(ti, item);
+                  await send({ type: "response.output_item.added", output_index: item.outputIndex, item: { id: item.id, type: "function_call", status: "in_progress", call_id: item.callId, name: item.name, arguments: "" } });
+                }
+                const fn = tc.function || {};
+                if (fn.name && !item.name) item.name = fn.name;
+                if (fn.arguments) {
+                  item.args += fn.arguments;
+                  await send({ type: "response.function_call_arguments.delta", item_id: item.id, output_index: item.outputIndex, delta: fn.arguments });
+                }
+              }
+            }
+
+            // 文本增量
+            if (delta.content) {
+              if (!contentItem) contentItem = startContent();
+              if (!contentItem.started) {
+                contentItem.started = true;
+                await send({ type: "response.output_item.added", output_index: contentItem.outputIndex, item: { id: contentItem.id, type: "message", status: "in_progress", role: "assistant", content: [] } });
+                await send({ type: "response.content_part.added", item_id: contentItem.id, output_index: contentItem.outputIndex, content_index: contentItem.contentIndex, part: { type: "output_text", text: "", annotations: [] } });
+              }
+              contentItem.text += delta.content;
+              await send({ type: "response.output_text.delta", item_id: contentItem.id, output_index: contentItem.outputIndex, content_index: contentItem.contentIndex, delta: delta.content });
+            }
           } catch {}
         }
       }
 
-      const part = { type: "output_text", text: outputText, annotations: [] };
-      await send({ type: "response.output_text.done", item_id: itemId, output_index: outputIndex, content_index: contentIndex, text: outputText });
-      await send({ type: "response.content_part.done", item_id: itemId, output_index: outputIndex, content_index: contentIndex, part });
-      await send({ type: "response.output_item.done", output_index: outputIndex, item: { id: itemId, type: "message", status: "completed", role: "assistant", content: [part] } });
+      // 既无文本也无工具调用时补一个空 message，避免 output 为空数组
+      if (items.length === 0) {
+        const item = startContent();
+        item.started = true;
+        await send({ type: "response.output_item.added", output_index: item.outputIndex, item: { id: item.id, type: "message", status: "in_progress", role: "assistant", content: [] } });
+        await send({ type: "response.content_part.added", item_id: item.id, output_index: item.outputIndex, content_index: item.contentIndex, part: { type: "output_text", text: "", annotations: [] } });
+      }
+
+      // 收尾：按出现顺序输出每个输出项的 done 事件
+      for (const item of items) {
+        if (item.kind === "message") {
+          if (!item.started) {
+            await send({ type: "response.output_item.added", output_index: item.outputIndex, item: { id: item.id, type: "message", status: "in_progress", role: "assistant", content: [] } });
+            await send({ type: "response.content_part.added", item_id: item.id, output_index: item.outputIndex, content_index: item.contentIndex, part: { type: "output_text", text: "", annotations: [] } });
+          }
+          const part = { type: "output_text", text: item.text, annotations: [] };
+          await send({ type: "response.output_text.done", item_id: item.id, output_index: item.outputIndex, content_index: item.contentIndex, text: item.text });
+          await send({ type: "response.content_part.done", item_id: item.id, output_index: item.outputIndex, content_index: item.contentIndex, part });
+          await send({ type: "response.output_item.done", output_index: item.outputIndex, item: { id: item.id, type: "message", status: "completed", role: "assistant", content: [part] } });
+        } else {
+          await send({ type: "response.output_item.done", output_index: item.outputIndex, item: { id: item.id, type: "function_call", status: "completed", call_id: item.callId, name: item.name, arguments: item.args } });
+        }
+      }
 
       const resp = responsesBase(mc, respId);
       resp.status = "completed";
       resp.model = model || mc.id;
-      resp.output = [{ id: itemId, type: "message", status: "completed", role: "assistant", content: [part] }];
+      resp.output = items.map((item) =>
+        item.kind === "message"
+          ? { id: item.id, type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text: item.text, annotations: [] }] }
+          : { id: item.id, type: "function_call", status: "completed", call_id: item.callId, name: item.name, arguments: item.args }
+      );
       resp.usage = responsesUsage();
       await send({ type: "response.completed", response: resp });
     } catch {}
@@ -650,7 +753,8 @@ async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc) {
 async function responsesToNonStream(upstreamBody, mc) {
   const reader = upstreamBody.getReader();
   const decoder = new TextDecoder();
-  let buf = "", outputText = "", reasoning = "", model = "";
+  let buf = "", model = "", outputText = "", reasoning = "";
+  const toolItems = new Map(); // 上游 tool_calls index → {id, callId, name, args}
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -668,19 +772,45 @@ async function responsesToNonStream(upstreamBody, mc) {
         const delta = choice.delta || {};
         if (delta.content) outputText += delta.content;
         if (delta.reasoning_content) reasoning += delta.reasoning_content;
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            if (!tc || typeof tc !== "object") continue;
+            const ti = tc.index ?? 0;
+            let item = toolItems.get(ti);
+            if (!item) {
+              const fn = tc.function || {};
+              item = {
+                id: "fc_" + Math.random().toString(36).slice(2, 10),
+                callId: tc.id || "call_" + Math.random().toString(36).slice(2, 10),
+                name: fn.name || "",
+                args: "",
+              };
+              toolItems.set(ti, item);
+            }
+            const fn = tc.function || {};
+            if (fn.name && !item.name) item.name = fn.name;
+            if (fn.arguments) item.args += fn.arguments;
+          }
+        }
         if (obj.model) model = obj.model;
       } catch {}
     }
   }
-  const text = outputText || reasoning;
   const resp = responsesBase(mc);
   resp.status = "completed";
   resp.model = model || mc.id;
-  resp.output = [{
-    id: "msg_" + Math.random().toString(36).slice(2, 10),
-    type: "message", status: "completed", role: "assistant",
-    content: [{ type: "output_text", text, annotations: [] }],
-  }];
+  resp.output = [];
+  if (outputText || reasoning) {
+    const text = outputText || reasoning;
+    resp.output.push({
+      id: "msg_" + Math.random().toString(36).slice(2, 10),
+      type: "message", status: "completed", role: "assistant",
+      content: [{ type: "output_text", text, annotations: [] }],
+    });
+  }
+  for (const item of toolItems.values()) {
+    resp.output.push({ id: item.id, type: "function_call", status: "completed", call_id: item.callId, name: item.name, arguments: item.args });
+  }
   resp.usage = responsesUsage();
   return resp;
 }
