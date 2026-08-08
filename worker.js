@@ -343,28 +343,28 @@ function responsesToChatParams(params, mc) {
     chat.response_format = { type: params.text.format.type };
     if (params.text.format.json_schema) chat.response_format.json_schema = params.text.format.json_schema;
   }
-  // Responses 工具格式（扁平 function）→ chat completions 格式（function 包装）
+  // Responses 工具格式（扁平 function）→ chat completions 格式（function 包装）。
+  // 上游只接受 type:"function"，namespace/web_search 等非 function 工具一律过滤，避免反序列化报错。
   if (Array.isArray(params.tools)) {
     chat.tools = params.tools
-      .map((t) => {
-        if (!t || typeof t !== "object") return null;
-        if (t.type === "function") {
-          return {
-            type: "function",
-            function: {
-              name: t.name || "",
-              description: t.description || "",
-              parameters: t.parameters || { type: "object", properties: {} },
-            },
-          };
-        }
-        return t;
-      })
-      .filter(Boolean);
+      .filter((t) => t && typeof t === "object" && t.type === "function")
+      .map((t) => ({
+        type: "function",
+        function: {
+          name: t.name || "",
+          description: t.description || "",
+          parameters: t.parameters || { type: "object", properties: {} },
+        },
+      }));
+    if (chat.tools.length === 0) delete chat.tools;
   }
-  // Responses tool_choice（{type:"function",name}）→ chat 格式
-  if (params.tool_choice && typeof params.tool_choice === "object" && params.tool_choice.type === "function" && params.tool_choice.name) {
-    chat.tool_choice = { type: "function", function: { name: params.tool_choice.name } };
+  // Responses tool_choice → chat 格式；仅支持 function 类型，其它对象形式退回 auto
+  if (params.tool_choice && typeof params.tool_choice === "object") {
+    if (params.tool_choice.type === "function" && params.tool_choice.name) {
+      chat.tool_choice = { type: "function", function: { name: params.tool_choice.name } };
+    } else {
+      chat.tool_choice = "auto";
+    }
   }
   chat.model = mc.id;
   chat.messages = responsesInputToMessages(params.input, params.instructions);
