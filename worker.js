@@ -42,6 +42,9 @@ export default {
     if (request.method === "POST" && (url.pathname === "/v1/chat/completions" || url.pathname === "/chat/completions")) {
       return handleChat(request, env);
     }
+    if (request.method === "POST" && (url.pathname === "/v1/responses" || url.pathname === "/responses")) {
+      return handleResponses(request, env);
+    }
     if (request.method === "POST" && (url.pathname === "/v1/messages" || url.pathname === "/messages")) {
       return jsonResponse({ error: { message: "Anthropic endpoint not yet implemented", type: "not_implemented" } }, 501);
     }
@@ -314,9 +317,72 @@ function buildUpstreamPayload(params, mc, sess, runId) {
 async function handleChat(request, env) {
   let params;
   try { params = await request.json(); } catch { return jsonResponse({ error: { message: "Invalid JSON", type: "parse_error" } }, 400); }
-
   const isStream = !!params.stream;
   const mc = MODELS.find((m) => m.id === (params.model || DEFAULT_MODEL)) || MODELS[0];
+  return executeChat(env, params, mc, isStream, "chat");
+}
+
+// OpenAI Responses API（/v1/responses）入口：把 Responses 请求翻译成 chat completions 上游调用
+async function handleResponses(request, env) {
+  let params;
+  try { params = await request.json(); } catch { return jsonResponse({ error: { message: "Invalid JSON", type: "parse_error" } }, 400); }
+  const isStream = !!params.stream;
+  const mc = MODELS.find((m) => m.id === (params.model || DEFAULT_MODEL)) || MODELS[0];
+  return executeChat(env, responsesToChatParams(params, mc), mc, isStream, "responses");
+}
+
+// Responses API 请求 → chat completions 参数（字段名/结构翻译）
+function responsesToChatParams(params, mc) {
+  const chat = {};
+  for (const k of ["temperature", "top_p", "tools", "tool_choice", "parallel_tool_calls", "stop", "seed", "store", "metadata", "user", "stream"]) {
+    if (params[k] !== undefined && params[k] !== null) chat[k] = params[k];
+  }
+  if (params.max_output_tokens !== undefined && params.max_output_tokens !== null) chat.max_completion_tokens = params.max_output_tokens;
+  if (params.reasoning && typeof params.reasoning === "object" && params.reasoning.effort) chat.reasoning_effort = params.reasoning.effort;
+  if (params.text && typeof params.text === "object" && params.text.format && params.text.format.type && params.text.format.type !== "text") {
+    chat.response_format = { type: params.text.format.type };
+    if (params.text.format.json_schema) chat.response_format.json_schema = params.text.format.json_schema;
+  }
+  chat.model = mc.id;
+  chat.messages = responsesInputToMessages(params.input, params.instructions);
+  return chat;
+}
+
+// Responses API input → chat messages（input 可为字符串或消息条目数组）
+function responsesInputToMessages(input, instructions) {
+  const messages = [];
+  if (instructions) messages.push({ role: "system", content: instructions });
+  if (typeof input === "string") { messages.push({ role: "user", content: input }); return messages; }
+  if (!Array.isArray(input)) { messages.push({ role: "user", content: input == null ? "" : String(input) }); return messages; }
+  for (const item of input) {
+    if (typeof item === "string") { messages.push({ role: "user", content: item }); continue; }
+    if (!item || typeof item !== "object") continue;
+    if (item.type === "function_call_output") {
+      messages.push({ role: "tool", tool_call_id: item.call_id || "", content: typeof item.output === "string" ? item.output : JSON.stringify(item.output ?? "") });
+      continue;
+    }
+    // function_call / reasoning / item_reference 等条目本地无法执行/回溯，跳过
+    if (item.type === "function_call" || item.type === "reasoning" || item.type === "item_reference") continue;
+    const role = item.role || "user";
+    const content = item.content;
+    if (typeof content === "string") { messages.push({ role, content }); continue; }
+    if (Array.isArray(content)) {
+      const parts = [];
+      for (const c of content) {
+        if (!c || typeof c !== "object") continue;
+        if (c.type === "input_text" || c.type === "output_text") { parts.push({ type: "text", text: c.text ?? "" }); continue; }
+        if (c.type === "text" && typeof c.text === "string") { parts.push(c); continue; }
+      }
+      messages.push({ role, content: parts.length ? parts : "" });
+      continue;
+    }
+    messages.push({ role, content: "" });
+  }
+  return messages;
+}
+
+// chat completions 与 responses 共用的上游执行：多号重试 + session/run 生命周期 + 流式/非流式出口
+async function executeChat(env, chatParams, mc, isStream, mode) {
   const debug = env.FREEBUFF_DEBUG === "true";
   const pool = parseAccounts(env);
   if (pool.length === 0) return jsonResponse({ error: { message: "缺少 FREEBUFF_TOKEN 环境变量", type: "config_error" } }, 503);
@@ -339,7 +405,7 @@ async function handleChat(request, env) {
       //    清缓存强制重建后重试一次；仍失败则冷却该号交给外层换号）
       let resp, errText = "", sessForChat = sess;
       for (let attempt = 0; attempt < 2; attempt++) {
-        const payload = buildUpstreamPayload(params, mc, sessForChat, run.runId);
+        const payload = buildUpstreamPayload(chatParams, mc, sessForChat, run.runId);
         const headers = {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
@@ -379,14 +445,17 @@ async function handleChat(request, env) {
 
       if (isStream) {
         const { readable, writable } = new TransformStream();
-        pipeUpstreamToClient(resp.body, writable);
+        if (mode === "responses") pipeUpstreamToResponsesStream(resp.body, writable, mc);
+        else pipeUpstreamToClient(resp.body, writable);
         return new Response(readable, { status: 200, headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...corsHeaders() } });
       }
+
+      if (mode === "responses") return jsonResponse(await responsesToNonStream(resp.body, mc), 200);
 
       const agg = await streamToNonStream(resp.body, mc.upstream);
       return jsonResponse(agg, 200);
     } catch (e) {
-      console.error("[handleChat]", e);
+      console.error("[" + mode + "]", e);
       const msg = String(e.message || e);
       // 任何上游交互失败/超时（含 chat fetch 20s abort）都冷却当前号，继续换下一个号
       if (/create session failed|stayed queued|start_run failed|session_model_mismatch|abort|timeout|timed out|terminated/i.test(msg)) {
@@ -481,6 +550,139 @@ async function streamToNonStream(upstreamBody, upstreamModel) {
     choices: [{ index: 0, message: msg, finish_reason: finishReason || "stop", logprobs: null }],
     usage: usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Responses API（/v1/responses）输出
+// ---------------------------------------------------------------------------
+
+function responsesBase(mc, respId) {
+  return {
+    id: respId || "resp_" + Math.random().toString(36).slice(2, 10),
+    object: "response",
+    created_at: Math.floor(Date.now() / 1000),
+    status: "in_progress",
+    error: null,
+    incomplete_details: null,
+    instructions: null,
+    max_output_tokens: null,
+    model: mc.id,
+    output: [],
+    parallel_tool_calls: true,
+    previous_response_id: null,
+    reasoning: { effort: null, summary: null },
+    store: true,
+    temperature: 1.0,
+    text: { format: { type: "text" } },
+    tool_choice: "auto",
+    tools: [],
+    top_p: 1.0,
+    truncation: "disabled",
+    usage: null,
+    user: null,
+    metadata: {},
+  };
+}
+
+function responsesUsage() {
+  return { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 0 };
+}
+
+// 流式：上游 chat SSE → Responses API 事件序列（response.created … response.completed）
+async function pipeUpstreamToResponsesStream(upstreamBody, writable, mc) {
+  const reader = upstreamBody.getReader();
+  const writer = writable.getWriter();
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  const respId = "resp_" + Math.random().toString(36).slice(2, 10);
+  const itemId = "msg_" + Math.random().toString(36).slice(2, 10);
+  const outputIndex = 0, contentIndex = 0;
+  let buf = "", outputText = "", model = "";
+  const send = (obj) => writer.write(encoder.encode("data: " + JSON.stringify(obj) + "\n\n"));
+  (async () => {
+    try {
+      await send({ type: "response.created", response: responsesBase(mc, respId) });
+      await send({ type: "response.in_progress", response: responsesBase(mc, respId) });
+      await send({ type: "response.output_item.added", output_index: outputIndex, item: { id: itemId, type: "message", status: "in_progress", role: "assistant", content: [] } });
+      await send({ type: "response.content_part.added", item_id: itemId, output_index: outputIndex, content_index: contentIndex, part: { type: "output_text", text: "", annotations: [] } });
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx); buf = buf.slice(idx + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "" || payload === "[DONE]") continue;
+          try {
+            const obj = unwrapData(JSON.parse(payload));
+            const choice = obj?.choices?.[0];
+            if (!choice) continue;
+            const delta = choice.delta || {};
+            if (delta.content) {
+              outputText += delta.content;
+              await send({ type: "response.output_text.delta", item_id: itemId, output_index: outputIndex, content_index: contentIndex, delta: delta.content });
+            }
+            if (obj.model) model = obj.model;
+          } catch {}
+        }
+      }
+
+      const part = { type: "output_text", text: outputText, annotations: [] };
+      await send({ type: "response.output_text.done", item_id: itemId, output_index: outputIndex, content_index: contentIndex, text: outputText });
+      await send({ type: "response.content_part.done", item_id: itemId, output_index: outputIndex, content_index: contentIndex, part });
+      await send({ type: "response.output_item.done", output_index: outputIndex, item: { id: itemId, type: "message", status: "completed", role: "assistant", content: [part] } });
+
+      const resp = responsesBase(mc, respId);
+      resp.status = "completed";
+      resp.model = model || mc.id;
+      resp.output = [{ id: itemId, type: "message", status: "completed", role: "assistant", content: [part] }];
+      resp.usage = responsesUsage();
+      await send({ type: "response.completed", response: resp });
+    } catch {}
+    finally { try { await writer.close(); } catch {} }
+  })();
+}
+
+// 非流式：聚合上游流成 Responses API 非流式对象
+async function responsesToNonStream(upstreamBody, mc) {
+  const reader = upstreamBody.getReader();
+  const decoder = new TextDecoder();
+  let buf = "", outputText = "", reasoning = "", model = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx); buf = buf.slice(idx + 1);
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "" || payload === "[DONE]") continue;
+      try {
+        const obj = unwrapData(JSON.parse(payload));
+        const choice = obj?.choices?.[0];
+        if (!choice) continue;
+        const delta = choice.delta || {};
+        if (delta.content) outputText += delta.content;
+        if (delta.reasoning_content) reasoning += delta.reasoning_content;
+        if (obj.model) model = obj.model;
+      } catch {}
+    }
+  }
+  const text = outputText || reasoning;
+  const resp = responsesBase(mc);
+  resp.status = "completed";
+  resp.model = model || mc.id;
+  resp.output = [{
+    id: "msg_" + Math.random().toString(36).slice(2, 10),
+    type: "message", status: "completed", role: "assistant",
+    content: [{ type: "output_text", text, annotations: [] }],
+  }];
+  resp.usage = responsesUsage();
+  return resp;
 }
 
 // ---------------------------------------------------------------------------
