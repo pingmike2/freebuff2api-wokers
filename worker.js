@@ -1841,11 +1841,12 @@ function getStore(env) {
           const kv = await Deno.openKv();
           storeBackendLabel = "deno_kv";
           return {
-            sum: async (key, n) => { if (n) await kv.atomic().sum(key, n).commit(); },
-            get: async (key) => (await kv.get(key)).value ?? null,
+            // Deno KV atomic().sum() requires bigint (KvU64), not number.
+            sum: async (key, n) => { if (n) await kv.atomic().sum(key, BigInt(Math.round(n))).commit(); },
+            get: async (key) => { const v = (await kv.get(key)).value; return v == null ? null : Number(v); },
             put: async (key, value) => { await kv.set(key, value); },
             del: async (key) => { await kv.delete(key); },
-            list: async (prefix) => { const out = []; const it = kv.list({ prefix }); for await (const e of it) out.push({ key: e.key, value: e.value }); return out; },
+            list: async (prefix) => { const out = []; const it = kv.list({ prefix }); for await (const e of it) out.push({ key: e.key, value: Number(e.value) }); return out; },
           };
         } catch {}
       }
@@ -1940,6 +1941,7 @@ function outputCharsOf(response) {
 }
 
 let lastFlushAt = 0;
+let flushLogged = false; // debug: log the first KV sum failure once per isolate
 async function maybeFlush(env) {
   if (Date.now() - lastFlushAt > 30000) await flushDeltas(env);
 }
@@ -1985,6 +1987,10 @@ async function flushDeltas(env) {
     if (r.status === "rejected") {
       failed = true;
       restoreDelta(ops[i].key, ops[i].n);
+      if (!flushLogged) {
+        flushLogged = true;
+        console.error("[flush] KV sum failed:", r.reason && r.reason.stack ? r.reason.stack : r.reason);
+      }
     }
   });
   if (failed) return;

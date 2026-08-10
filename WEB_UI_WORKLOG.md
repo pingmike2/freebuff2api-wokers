@@ -108,8 +108,14 @@ New dashboard features (from agent brainstorm, all additive to existing response
 - Header badges: `store: deno_kv|cf_kv|memory` + flush health + alert channels (`adminStatus` additive fields)
 - `readDays` removed (inlined into handleAdminUsage single KV pass)
 
-## Live status (2026-08-10, DEPLOYED)
+## KV on the NEW Deno Deploy platform (console.deno.com) — gotchas
 
+- Deno KV is a **separate "database" resource**: `deno deploy database provision freebuff2api-kv --kind denokv --org hknerdr`, then `deno deploy database assign freebuff2api-kv --org hknerdr --app freebuff2api-prod`, then redeploy. Without this, `Deno.openKv()` fails and the store falls back to in-memory (counters reset on restart).
+- **`kv.atomic().sum()` requires `bigint`, NOT number** — on the new runtime a number throws `TypeError: Value must be a bigint` and every flush silently fails (worker falls back to restore-deltas, counters never persist). The Deno KV backend now wraps: `sum: (key,n) => kv.atomic().sum(key, BigInt(Math.round(n)))`, and `get`/`list` convert values back with `Number(...)`.
+- `flush: False` in `/admin/status` = last flush failed or nothing to flush; the worker logs `[flush] KV sum failed: ...` once per isolate on failure (kept as diagnostics).
+- Multi-isolate: Deno Deploy runs several isolates; per-isolate in-memory deltas flush to shared KV on a 30s cadence / admin reads. Totals are KV-atomic; per-key limits remain best-effort across isolates (documented).
+
+## Live status (2026-08-10, DEPLOYED)
 - **v1.8.0 CANLI**: `https://freebuff2api-prod.hknerdr.deno.net`
   - `/healthz` → `1.8.0`, 5/5 hesap canlı; `/admin`, `/` → 200 HTML; `/admin/status` → custom auth, key_count 1
   - `/admin/usage` key'li → 200 (sayaçlar canlı trafiği sayıyor); key'siz → 401
