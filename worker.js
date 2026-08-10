@@ -71,6 +71,26 @@ export default {
       if (!isAdminKey(env, key)) return jsonResponse({ error: { message: "Admin key required", type: "auth_error" } }, 403);
       return handleModelToggle(request, env);
     }
+    if (request.method === "GET" && url.pathname === "/admin/log") {
+      if (!isAdminKey(env, key)) return jsonResponse({ error: { message: "Admin key required", type: "auth_error" } }, 403);
+      return handleAdminLog();
+    }
+    if (request.method === "GET" && url.pathname === "/admin/state") {
+      if (!isAdminKey(env, key)) return jsonResponse({ error: { message: "Admin key required", type: "auth_error" } }, 403);
+      return handleAdminState(env);
+    }
+    if (request.method === "POST" && url.pathname === "/admin/alerts/test") {
+      if (!isAdminKey(env, key)) return jsonResponse({ error: { message: "Admin key required", type: "auth_error" } }, 403);
+      return handleAlertTest(env);
+    }
+    if (request.method === "POST" && url.pathname === "/admin/maintenance") {
+      if (!isAdminKey(env, key)) return jsonResponse({ error: { message: "Admin key required", type: "auth_error" } }, 403);
+      return handleMaintenance(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/admin/keys") {
+      if (!isAdminKey(env, key)) return jsonResponse({ error: { message: "Admin key required", type: "auth_error" } }, 403);
+      return handleAdminKeys(request, env);
+    }
     if (request.method === "GET" && (url.pathname === "/v1/admin/accounts" || url.pathname === "/admin/accounts")) {
       if (!isAdminKey(env, key)) return jsonResponse({ error: { message: "Admin key required", type: "auth_error" } }, 403);
       return handleAdminAccounts(env, url.searchParams.get("refresh") === "1");
@@ -99,7 +119,7 @@ export default {
 let accountIdx = 0;
 const usageStats = {
   started: Date.now(), requests: 0, successes: 0, errors: 0, inputChars: 0, outputChars: 0,
-  byModel: new Map(), byKey: new Map(), byDay: new Map(), byDayModel: new Map(),
+  byModel: new Map(), byKey: new Map(), byDay: new Map(), byDayModel: new Map(), byHour: new Map(),
 };
 const cooldowns = new Map();      // token ->  ms
 const sessCache = new Map();      // `${token}:${sessionModel}` -> { instanceId, model, remainingMs, expiresAt }（ token，）
@@ -195,6 +215,8 @@ async function handleAdminAccounts(env, forceRefresh) {
           q[model] = {
             used: typeof v.recentCount === "number" ? v.recentCount : typeof v.used === "number" ? v.used : null,
             limit: typeof v.limit === "number" ? v.limit : null,
+            reset_at: typeof v.resetAt === "string" ? v.resetAt : typeof v.resetAt === "number" ? new Date(v.resetAt).toISOString() : (v.reset_at || null),
+            reset_time_zone: v.resetTimeZone || v.reset_time_zone || null,
           };
         }
       }
@@ -216,6 +238,7 @@ async function handleAdminAccounts(env, forceRefresh) {
 
 async function handleAdminUsage(env) {
   await flushDeltas(env);
+  checkThresholds(env);
   const s = await getStore(env);
   const total = {};
   for (const f of FIELD_NAMES) total[f] = (await s.get(["usage", "total", f])) || 0;
@@ -243,7 +266,7 @@ async function handleAdminUsage(env) {
       mm[key[5]] = (mm[key[5]] || 0) + e.value;
     }
   }
-  let days = [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 14);
+  let days = [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 30);
   const dd = usageStats.byDay.get(today);
   if (dd) {
     if (days.length && days[0].date === today) {
@@ -264,8 +287,26 @@ async function handleAdminUsage(env) {
   const daySet = new Set(days.map((d) => d.date));
   const byDayModelTrim = {};
   for (const date of Object.keys(byDayModel)) if (daySet.has(date)) byDayModelTrim[date] = byDayModel[date];
+  const hours = {};
+  for (const e of dayItems) {
+    if (e.key.length !== 5 || e.key[3] === "model" || e.key[3] === "key") continue;
+    const date = String(e.key[2]);
+    if (!daySet.has(date)) continue;
+    const hh = String(e.key[3]);
+    const hd = hours[date] = hours[date] || {};
+    const row = hd[hh] = hd[hh] || { requests: 0, successes: 0, errors: 0 };
+    row[e.key[4]] = (row[e.key[4]] || 0) + e.value;
+  }
+  for (const [k, v] of usageStats.byHour) {
+    const idx = k.lastIndexOf("\u0000");
+    const date = k.slice(0, idx);
+    if (!daySet.has(date)) continue;
+    const hd = hours[date] = hours[date] || {};
+    const row = hd[k.slice(idx + 1)] = hd[k.slice(idx + 1)] || { requests: 0, successes: 0, errors: 0 };
+    for (const f of ["requests", "successes", "errors"]) row[f] = (row[f] || 0) + (v[f] || 0);
+  }
   const keys = [];
-  for (const k of parseApiKeys(env)) {
+  for (const k of allKeys(env)) {
     const prefix = keyPrefixOf(k.key);
     const keyId = keyAccountId(k.key);
     const kd = { requests: 0, successes: 0, errors: 0 };
@@ -288,7 +329,7 @@ async function handleAdminUsage(env) {
       for (const f of ["requests", "successes", "errors"]) row[f] += d[f] || 0;
     }
     const keyDays = [...kDayMap.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 14);
-    keys.push({ prefix, limit: k.limit || null, today_requests: kd.requests, today_successes: kd.successes, today_errors: kd.errors, days: keyDays });
+    keys.push({ prefix, limit: k.limit || null, enabled: k.enabled !== false, managed: !!k.kv, today_requests: kd.requests, today_successes: kd.successes, today_errors: kd.errors, days: keyDays });
   }
   const customKey = (env.API_KEY || env.FREEBUFF_API_KEY || env.FREEBUFF_API_KEYS || "").trim();
   return jsonResponse({
@@ -303,6 +344,7 @@ async function handleAdminUsage(env) {
     output_characters: total.outputChars,
     by_model: byModel,
     by_day_model: byDayModelTrim,
+    hours,
     days,
     keys,
     note: "Counters persist in KV across restarts; account quotas come from Freebuff.",
@@ -321,7 +363,7 @@ body{margin:0;font:15px/1.6 var(--mono);background:var(--bg);color:var(--text)}
 a{color:var(--accent);text-decoration:none}
 a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 ::selection{background:rgba(148,226,213,.25)}
-header{position:sticky;top:0;z-index:10;background:var(--bg-alt);border-bottom:1px solid var(--border);padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+header{position:sticky;top:0;z-index:10;background:var(--bg-alt);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;line-height:1.2;letter-spacing:.04em}
 .brand .dot{display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--warn);margin-right:2px}
 .brand .dot.ok{background:var(--ok)}
@@ -332,7 +374,8 @@ header{position:sticky;top:0;z-index:10;background:var(--bg-alt);border-bottom:1
 .tag{font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:var(--r);padding:2px 8px}
 .tag.accent{color:var(--accent);border-color:rgba(148,226,213,.4)}
 main{max-width:1200px;margin:22px auto;padding:0 18px 60px}
-section{background:var(--panel);border:1px solid var(--border);border-radius:var(--r);padding:20px;margin:16px 0}
+section{background:var(--panel);border:1px solid var(--border);border-radius:var(--r);padding:16px;margin:12px 0}
+#authCard.collapsed{display:none}
 h1{font-size:18px;margin:0 0 4px;font-weight:700}
 h2{font-size:15px;margin:0 0 12px;font-weight:600}
 h2::before{content:'# ';color:var(--accent)}
@@ -391,6 +434,11 @@ code.inline{background:var(--card);border:1px solid var(--border);border-radius:
 .spark i{display:inline-block;width:4px;background:var(--accent);border-radius:1px}
 .spark i.warn{background:var(--warn)}
 .spark i.err{background:var(--err)}
+.heat{overflow-x:auto}
+.heatgrid{border-collapse:collapse;min-width:640px}
+.heatgrid td{width:14px;height:12px;padding:0;border:1px solid var(--bg);border-radius:1px}
+.heatgrid th{font-size:10px;padding:2px;text-align:center}
+.heatgrid td:first-child{width:auto;padding:2px 8px;text-align:left}
 #chart rect{transform-origin:50% 100%;animation:bar-grow .45s cubic-bezier(.22,1,.36,1) backwards}
 @keyframes bar-grow{from{transform:scaleY(0)}}
 @media (prefers-reduced-motion:reduce){.brand .cursor{animation:none}#chart rect{animation:none}button:active{transform:none}}
@@ -446,7 +494,7 @@ function adminBody() {
   <div class="brand"><span class="dot" id="dot"></span><span class="prompt">$</span>freebuff2api<span class="cursor"></span><span class="tag" id="version">console</span></div>
   <div class="tag" id="backend">store: ...</div>
   <div class="tag accent" id="alertCfg" style="display:none"></div>
-  <div class="row" style="margin-left:auto"><a class="btn" href="/">Home</a><button class="ghost small" onclick="loadAll(true)">Refresh</button></div>
+  <div class="row" style="margin-left:auto"><button class="ghost small" id="disconnect" onclick="disconnect()" style="display:none">Disconnect</button><a class="btn" href="/">Home</a><button class="ghost small" onclick="loadAll(true)">Refresh</button></div>
 </header>
 <main>
 <section id="authCard">
@@ -462,18 +510,32 @@ function adminBody() {
   <button id="tab-overview" class="active" onclick="switchTab('overview')">Overview</button>
   <button id="tab-accounts" onclick="switchTab('accounts')">Accounts</button>
   <button id="tab-models" onclick="switchTab('models')">Models</button>
+  <button id="tab-system" onclick="switchTab('system')">System</button>
 </div>
 <section id="panel-overview" class="panel active">
   <h2>Health <span class="muted" id="usageTime"></span></h2>
   <div id="usage" class="grid"></div>
-  <h2>Traffic <span class="muted">last 14 days</span>
+  <h2>Traffic <span class="muted">per day</span>
     <select id="chartModel" onchange="chartSel()" style="width:auto;margin-left:8px"></select>
+    <select id="chartRange" onchange="chartSel()" style="width:auto;margin-left:8px">
+      <option value="7">7d</option><option value="14" selected>14d</option><option value="30">30d</option>
+    </select>
   </h2>
   <div id="chart"></div>
-  <h2>API keys <span class="muted">today + 14d history</span></h2>
+  <h2>Hourly heatmap <span class="muted">last 7 days, UTC</span></h2>
+  <div class="heat" id="heatmap"></div>
+  <h2>API keys <span class="muted">today + 14d</span></h2>
   <div id="keys"></div>
+  <h2>Add key <span class="muted">persisted in KV</span></h2>
+  <div class="row">
+    <input id="newKey" placeholder="new api key" style="flex:1;min-width:200px">
+    <input id="newKeyLimit" placeholder="daily limit (0 = unlimited)" style="width:180px">
+    <button class="ghost small" onclick="addKey()">Add</button>
+  </div>
   <h2>Per model <button class="ghost small" onclick="exportCsv()" style="margin-left:8px">Download CSV</button></h2>
   <div id="byModel"></div>
+  <h2>Request log <span class="muted">last 50, current isolate</span></h2>
+  <div id="reqlog"></div>
   <p class="muted">Counters persist in KV across restarts. Account quotas come from Freebuff.</p>
 </section>
 <section id="panel-accounts" class="panel">
@@ -488,6 +550,24 @@ function adminBody() {
   <h2>Model catalog <span class="muted">toggle enabled/disabled (persisted in KV)</span></h2>
   <div id="models">Loading...</div>
 </section>
+<section id="panel-system" class="panel">
+  <h2>Alerts</h2>
+  <div id="alertStatus" class="muted">Loading...</div>
+  <div class="row" style="margin-top:8px"><button class="ghost small" onclick="testAlert()">Send test alert</button><span class="muted" id="alertResult"></span></div>
+  <h2>Maintenance mode</h2>
+  <div class="row"><span class="muted" id="maintState">off</span><button class="ghost small" id="maintBtn" onclick="toggleMaint()">Enable</button></div>
+  <h2>Sessions &amp; cooldowns <span class="muted">current isolate</span></h2>
+  <div id="stateTable"><p class="muted">Open System tab to load.</p></div>
+  <h2>Appearance</h2>
+  <div class="row">
+    <span class="muted">Accent:</span>
+    <button class="ghost small" onclick="setAccent('#94e2d5')">teal</button>
+    <button class="ghost small" onclick="setAccent('#89b4fa')">blue</button>
+    <button class="ghost small" onclick="setAccent('#a6e3a1')">green</button>
+  </div>
+  <h2>Storage</h2>
+  <div id="storageInfo" class="muted">From /admin/status (boot).</div>
+</section>
 </main>
 <script>
 var KEY='';
@@ -496,37 +576,49 @@ var LAST_DAYS=[];
 var LAST_BDM={};
 var MODEL_IDS=[];
 var STORE_MODELS=null;
+var REFRESHING=false;
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function setStatus(t,kind){var b=$('status');b.textContent=t||'';b.style.color=kind==='ok'?'var(--ok)':kind==='err'?'var(--err)':'inherit'}
 function banner(t){var b=$('authHint');b.textContent=t;b.style.display=t?'block':'none'}
 function authHeaders(){return{Authorization:'Bearer '+KEY}}
 async function get(path){var r=await fetch(path,{headers:authHeaders()});var j;try{j=await r.json()}catch(e){j={}}if(!r.ok){throw Error((j&&j.error&&j.error.message)||('HTTP '+r.status))}return j}
-function switchTab(t){['overview','accounts','models'].forEach(function(n){$('panel-'+n).classList.toggle('active',n===t);$('tab-'+n).classList.toggle('active',n===t)});if(t==='models')loadModels()}
+function switchTab(t){['overview','accounts','models','system'].forEach(function(n){$('panel-'+n).classList.toggle('active',n===t);$('tab-'+n).classList.toggle('active',n===t)});if(t==='models')loadModels();if(t==='system')loadState()}
 function fmtDur(sec){sec=sec||0;var h=Math.floor(sec/3600),m=Math.floor(sec%3600/60);return h>0?(h+'h '+m+'m'):(m+'m '+(sec%60)+'s')}
 function fmtPct(n){if(n==null||!isFinite(n))return '0%';return Math.round(n*100)+'%'}
 function statusDot(ok){$('dot').className='dot'+(ok?' ok':'')}
 function deltaChip(cur,prev){if(cur==null||prev==null||prev<=0)return '<span class="delta flat">-</span>';var d=(cur-prev)/prev;var cls=d>=0?'up':'down';var sign=d>=0?'+':'';return '<span class="delta '+cls+'">'+sign+Math.round(d*100)+'% vs prev day</span>'}
-async function boot(){try{var s=await (await fetch('/admin/status')).json();$('version').textContent='v'+s.version;var a=s.auth||{};if(a.api_key_set===false){statusDot(false);banner('Warning: no FREEBUFF_API_KEY is configured on the server, so it only accepts the default key "freebuff-default-key". Set FREEBUFF_API_KEY (or FREEBUFF_API_KEYS) for your own keys.')}else{statusDot(true);banner(a.mode==='default'?'Server uses the default key "freebuff-default-key" (no custom key set).':null)}$('backend').textContent='store: '+(s.store_backend||'?')+(s.last_flush_at?' | flush ok':' | flush none');var ac=$('alertCfg');if(s.alerts){var parts=[];if(s.alerts.webhook)parts.push('webhook');if(s.alerts.telegram)parts.push('telegram');if(parts.length){ac.style.display='';ac.textContent='alerts: '+parts.join('+')}else{ac.style.display='none'}}else{ac.style.display='none'}$('status').textContent=s.accounts+' account(s), '+s.models+' model(s), '+s.key_count+' key(s), up '+fmtDur(s.uptime_seconds)}catch(e){statusDot(false);setStatus('Status probe failed: '+e.message,'err')}}
-async function loadAll(refresh){var k=$('key').value.trim();if(!k){setStatus('Enter the API key first','err');return}KEY=k;setStatus('Loading...');try{var u=await get('/admin/usage'),a=await get('/admin/accounts'+(refresh?'?refresh=1':''));LAST_USAGE=u;renderUsage(u);fillChartSelect(u.by_day_model||{});renderChart(u.days||[],u.by_day_model||{});renderKeys(u.keys||[]);renderAccounts(a);renderAcctErrors(a);renderMatrix(a,MODEL_IDS);setStatus('Updated '+new Date().toLocaleTimeString(),'ok')}catch(e){setStatus(e.message,'err');$('accounts').textContent='Could not load accounts.';banner('Auth failed: '+e.message+' - check that the key matches FREEBUFF_API_KEY.')}}
+async function boot(){try{var s=await (await fetch('/admin/status')).json();$('version').textContent='v'+s.version;var a=s.auth||{};if(a.api_key_set===false){statusDot(false);banner('Warning: no FREEBUFF_API_KEY is configured on the server, so it only accepts the default key "freebuff-default-key". Set FREEBUFF_API_KEY (or FREEBUFF_API_KEYS) for your own keys.')}else{statusDot(true);banner(a.mode==='default'?'Server uses the default key "freebuff-default-key" (no custom key set).':null)}$('backend').textContent='store: '+(s.store_backend||'?')+(s.last_flush_at?' | flush ok':' | flush none');var ac=$('alertCfg');if(s.alerts){var parts=[];if(s.alerts.webhook)parts.push('webhook');if(s.alerts.telegram)parts.push('telegram');if(parts.length){ac.style.display='';ac.textContent='alerts: '+parts.join('+')}else{ac.style.display='none'}}else{ac.style.display='none'}$('status').textContent=s.accounts+' account(s), '+s.models+' model(s), '+s.key_count+' key(s), up '+fmtDur(s.uptime_seconds);$('storageInfo').textContent='backend: '+(s.store_backend||'?')+' | last flush: '+(s.last_flush_at?s.last_flush_at.slice(11,19)+'Z':'never');var al=$('alertStatus');if(s.alerts){al.innerHTML='webhook: <b class="'+(s.alerts.webhook?'ok':'err')+'">'+(s.alerts.webhook?'on':'off')+'</b> | telegram: <b class="'+(s.alerts.telegram?'ok':'err')+'">'+(s.alerts.telegram?'on':'off')+'</b>'}setAccent(localStorage.getItem('f2a-accent')||'#94e2d5',true)}catch(e){statusDot(false);setStatus('Status probe failed: '+e.message,'err')}}
+async function loadAll(refresh){if(REFRESHING)return;REFRESHING=true;var k=$('key').value.trim();if(!k){setStatus('Enter the API key first','err');REFRESHING=false;return}KEY=k;setStatus('Loading...');try{var u=await get('/admin/usage'),a=await get('/admin/accounts'+(refresh?'?refresh=1':'')),l=await get('/admin/log');LAST_USAGE=u;renderUsage(u);renderLatency(l);fillChartSelect(u.by_day_model||{});renderChart(u.days||[],u.by_day_model||{});renderKeys(u.keys||[]);renderHeatmap(u.hours||{});renderAccounts(a);renderAcctErrors(a);renderMatrix(a,MODEL_IDS);renderLog(l);$('authCard').classList.add('collapsed');$('disconnect').style.display='';setStatus('Updated '+new Date().toLocaleTimeString(),'ok')}catch(e){setStatus(e.message,'err');$('accounts').textContent='Could not load accounts.';banner('Auth failed: '+e.message+' - check that the key matches FREEBUFF_API_KEY.')}finally{REFRESHING=false}}
+function disconnect(){KEY='';$('authCard').classList.remove('collapsed');$('disconnect').style.display='none';setStatus('Disconnected','')}
 function renderUsage(u){var req=u.requests||0,ok=u.successes||0,err=u.errors||0;var sr=req?(ok/req):0,er=req?(err/req):0;var d=u.days||[];var prev=d.length>1?d[1].requests:null;var cur=d.length?d[0].requests:req;var cards=[['Requests',req,deltaChip(cur,prev)],['Success rate',fmtPct(sr),''],['Error rate',fmtPct(er),''],['Input chars',u.input_characters,''],['Output chars',u.output_characters,''],['Uptime',fmtDur(u.uptime_seconds),'']];$('usage').innerHTML=cards.map(function(x){return '<div class="card"><b>'+esc(x[1])+'</b><span>'+esc(x[0])+'</span>'+x[2]+'</div>'}).join('');var rows=Object.keys(u.by_model||{}).map(function(m){var v=u.by_model[m];return '<tr><td><code>'+esc(m)+'</code></td><td class="num">'+v.requests+'</td><td class="num">'+v.successes+'</td><td class="num">'+v.errors+'</td></tr>'}).join('');$('byModel').innerHTML=rows?'<table><thead><tr><th>Model</th><th class="num">Requests</th><th class="num">OK</th><th class="num">Errors</th></tr></thead><tbody>'+rows+'</tbody></table>':'<p class="muted">No requests yet.</p>';$('usageTime').textContent='('+u.version+')'}
+function renderLatency(l){if(!l||!l.entries||!l.entries.length)return;var ms=[];l.entries.forEach(function(e){if(e.ms!=null)ms.push(e.ms)});if(!ms.length)return;ms.sort(function(a,b){return a-b});var p=function(p){var i=Math.min(ms.length-1,Math.floor(p*ms.length));return ms[i]};var lat='<div class="card"><b>'+p(0.5)+'ms</b><span>p50 latency</span></div><div class="card"><b>'+p(0.95)+'ms</b><span>p95 latency</span></div>';$('usage').innerHTML+=lat}
 function fillChartSelect(bdm){var ids=MODEL_IDS.length?MODEL_IDS:Object.keys(bdm||{});var cur=$('chartModel').value;var opts=['<option value="all">all models</option>'].concat(ids.map(function(id){return '<option value="'+esc(id)+'">'+esc(id)+'</option>'}));$('chartModel').innerHTML=opts.join('');$('chartModel').value=(cur&&ids.indexOf(cur)>=0)?cur:'all'}
-function renderChart(days,bdm){LAST_DAYS=days;LAST_BDM=bdm;drawChart(days,bdm,$('chartModel').value)}
+function renderChart(days,bdm){LAST_DAYS=days;LAST_BDM=bdm;chartSel()}
+function chartSel(){var range=parseInt($('chartRange').value||'14',10);var days=(LAST_DAYS||[]).slice(0,range);drawChart(days,LAST_BDM||{},$('chartModel').value)}
 function drawChart(days,bdm,sel){var el=$('chart');if(!days||!days.length){el.innerHTML='<p class="muted">No daily data yet.</p>';return}var vals=days.map(function(d){if(sel&&sel!=='all'&&bdm&&bdm[d.date]){var m=bdm[d.date][sel];return m?m.requests:0}return d.requests});var max=1;vals.forEach(function(v){if(v>max)max=v});var w=560,h=120,pad=4,bw=Math.max(4,(w-pad*2)/Math.max(vals.length,1)-2);var bars=vals.map(function(v,i){var bh=Math.round((v/max)*(h-24));var x=pad+i*(bw+2);var y=h-20-bh;return '<rect x="'+x+'" y="'+y+'" width="'+bw+'" height="'+bh+'" rx="1" fill="var(--accent)" style="animation-delay:'+(i*25)+'ms"><title>'+days[i].date+': '+v+' requests</title></rect>'}).join('');var labels=days.map(function(d,i){var x=pad+i*(bw+2);return '<text x="'+x+'" y="'+(h-6)+'" font-size="11" fill="var(--muted)">'+d.date.slice(5)+'</text>'}).join('');el.innerHTML='<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto">'+bars+labels+'</svg>'}
-function chartSel(){drawChart(LAST_DAYS||[],LAST_BDM||{},$('chartModel').value)}
+function renderHeatmap(hours){var el=$('heatmap');if(!hours||!Object.keys(hours).length){el.innerHTML='<p class="muted">No hourly data yet.</p>';return}var dates=Object.keys(hours).sort().slice(-7);var max=1;dates.forEach(function(d){Object.keys(hours[d]).forEach(function(h){if(hours[d][h].requests>max)max=hours[d][h].requests})});var head='<tr><th>date</th>'+Array.from({length:24},function(_,h){return '<th>'+h+'</th>'}).join('')+'</tr>';var rows=dates.map(function(d){var cells=Array.from({length:24},function(_,h){var v=hours[d][String(h).padStart(2,'0')];var n=v?v.requests:0;var a=n?Math.max(0.08,Math.min(1,n/max)):0;var bg=a?'rgba(148,226,213,'+a.toFixed(2)+')':'';return '<td style="background:'+bg+'" title="'+d+' '+h+':00Z '+n+' req"></td>'}).join('');return '<tr><td class="muted">'+d.slice(5)+'</td>'+cells+'</tr>'}).join('');el.innerHTML='<table class="heatgrid"><thead>'+head+'</thead><tbody>'+rows+'</tbody></table>'}
 function sparkline(days){if(!days||!days.length)return '<span class="muted">-</span>';var max=1;days.forEach(function(d){if(d.requests>max)max=d.requests});var bars=days.slice(0,14).map(function(d){var hh=Math.max(2,Math.round((d.requests/max)*20));var cls=d.errors>0?(d.errors>=d.requests?'err':'warn'):'';return '<i class="'+cls+'" style="height:'+hh+'px" title="'+d.date+': '+d.requests+' req, '+d.errors+' err"></i>'}).join('');return '<span class="spark">'+bars+'</span>'}
 function resetTime(){var now=new Date();var next=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()+1));var diff=next-now;var h=Math.floor(diff/3600000),m=Math.floor(diff%3600000/60000);return (h<10?'0'+h:h)+':'+(m<10?'0'+m:m)}
-function renderKeys(keys){var el=$('keys');if(!keys||!keys.length){el.innerHTML='<p class="muted">No keys configured.</p>';return}var rt=resetTime();var rows=keys.map(function(k){var lim=k.limit?'daily limit '+k.limit:'unlimited';var res=k.limit?'<span class="muted">resets '+rt+' UTC</span>':'';return '<tr><td><code>'+esc(k.prefix)+'&hellip;</code></td><td>'+esc(lim)+'</td><td class="num">'+k.today_requests+'</td><td class="num">'+k.today_successes+'</td><td class="num">'+k.today_errors+'</td><td>'+sparkline(k.days)+'</td><td>'+res+'</td></tr>'}).join('');el.innerHTML='<table><thead><tr><th>Key</th><th>Limit</th><th class="num">Req today</th><th class="num">OK</th><th class="num">Err</th><th>14d</th><th>Reset</th></tr></thead><tbody>'+rows+'</tbody></table>'}
+function renderKeys(keys){var el=$('keys');if(!keys||!keys.length){el.innerHTML='<p class="muted">No keys configured.</p>';return}var rt=resetTime();var rows=keys.map(function(k){var lim=k.limit?'daily limit '+k.limit:'unlimited';var res=k.limit?'<span class="muted">resets '+rt+' UTC</span>':'';var st=k.enabled?'<span class="pill ok">on</span>':'<span class="pill bad">off</span>';var act=k.managed?'<button class="ghost small" onclick="removeKey(\\''+esc(k.prefix)+'\\')">Del</button> <button class="ghost small" onclick="toggleKey(\\''+esc(k.prefix)+'\\',\\''+(k.enabled?'disable':'enable')+'\\')">'+(k.enabled?'Dis':'En')+'</button>':'<span class="muted">env</span>';return '<tr><td><code>'+esc(k.prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc(lim)+'</td><td class="num">'+k.today_requests+'</td><td class="num">'+k.today_successes+'</td><td class="num">'+k.today_errors+'</td><td>'+sparkline(k.days)+'</td><td>'+res+'</td><td>'+act+'</td></tr>'}).join('');el.innerHTML='<table><thead><tr><th>Key</th><th>State</th><th>Limit</th><th class="num">Req</th><th class="num">OK</th><th class="num">Err</th><th>14d</th><th>Reset</th><th></th></tr></thead><tbody>'+rows+'</tbody></table>'}
 function renderAccounts(a){var rows=a.accounts.map(function(x){var st=x.alive===true?'<span class="pill ok">alive</span>':x.alive===false?'<span class="pill bad">invalid</span>':'<span class="pill unk">unknown</span>';var lu=x.last_used_at?new Date(x.last_used_at).toLocaleTimeString():'<span class="muted">-</span>';var le=x.last_error?esc(x.last_error)+' <span class="muted">('+((x.last_error_at||'').slice(5,19).replace('T',' '))+')</span>':'<span class="muted">-</span>';return '<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc(x.uid||'-')+'</td><td class="num">'+(x.requests||0)+'</td><td>'+lu+'</td><td>'+le+'</td></tr>'}).join('');$('accounts').innerHTML='<table><thead><tr><th>Account</th><th>Status</th><th>UID</th><th class="num">Req</th><th>Last used</th><th>Last error</th></tr></thead><tbody>'+rows+'</tbody></table>'}
-function qcell(v){if(!v||v.used==null||v.limit==null)return '<span class="qcell">- / -</span>';var ratio=v.limit>0?v.used/v.limit:0;var cls=ratio>=1?'exh':ratio>=0.8?'warn':'ok';return '<span class="qcell '+cls+'" title="'+(v.limit-v.used)+' remaining">'+v.used+' / '+v.limit+'</span>'}
+function qcell(v){if(!v||v.used==null||v.limit==null)return '<span class="qcell">- / -</span>';var ratio=v.limit>0?v.used/v.limit:0;var cls=ratio>=1?'exh':ratio>=0.8?'warn':'ok';var tt=v.used+' / '+v.limit+(v.reset_at?' · resets '+v.reset_at.slice(11,16)+'Z':'')+(v.reset_time_zone?' '+v.reset_time_zone:'');return '<span class="qcell '+cls+'" title="'+tt+'">'+v.used+' / '+v.limit+'</span>'}
 function renderMatrix(a,modelIds){var el=$('quotaMatrix');var accts=a.accounts||[];var models=modelIds&&modelIds.length?modelIds:[];if(!models.length){var seen={};accts.forEach(function(x){Object.keys(x.quota||{}).forEach(function(m){seen[m]=1})});models=Object.keys(seen)}if(!accts.length){el.innerHTML='<p class="muted">No accounts.</p>';return}var head='<thead><tr><th>Account</th>'+models.map(function(m){return '<th title="'+esc(m)+'">'+esc(m.replace(/^.*\\//,''))+'</th>'}).join('')+'</tr></thead>';var body=accts.map(function(x){var q=x.quota||{};return '<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td>'+models.map(function(m){return '<td>'+qcell(q[m])+'</td>'}).join('')+'</tr>'}).join('');el.innerHTML='<table>'+head+'<tbody>'+body+'</tbody></table>'}
 function renderAcctErrors(a){var el=$('acctErrors');var rows=[];(a.accounts||[]).forEach(function(x){var es=x.last_errors||[];es.forEach(function(e){var st=e.status?'<span class="pill '+(e.status>=500?'bad':e.status>=400?'warn':'ok')+'">'+e.status+'</span>':'<span class="pill unk">?</span>';rows.push('<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc((e.time||'').slice(5,19).replace('T',' '))+'</td><td>'+esc(e.message||'')+'</td></tr>')})});el.innerHTML=rows.length?'<table><thead><tr><th>Account</th><th>Status</th><th>Time</th><th>Message</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>':'<p class="muted">No recorded errors.</p>'}
+function renderLog(l){var el=$('reqlog');if(!l||!l.entries||!l.entries.length){el.innerHTML='<p class="muted">No requests logged yet.</p>';return}var rows=l.entries.map(function(e){var st=e.status<400?'<span class="pill ok">'+e.status+'</span>':e.status===429?'<span class="pill warn">429</span>':'<span class="pill bad">'+e.status+'</span>';return '<tr><td class="muted">'+esc((e.t||'').slice(11,19))+'</td><td><code>'+esc(e.model||'')+'</code></td><td><code>'+esc(e.key||'')+'</code></td><td>'+st+'</td><td class="num">'+(e.ms!=null?e.ms+'ms':'')+'</td><td><code>'+esc(e.acct||'-')+'</code></td></tr>'}).join('');el.innerHTML='<table><thead><tr><th>Time</th><th>Model</th><th>Key</th><th>Status</th><th class="num">Latency</th><th>Account</th></tr></thead><tbody>'+rows+'</tbody></table>'}
 async function loadModels(){try{var m=await (await fetch('/admin/models')).json();STORE_MODELS=m.data;MODEL_IDS=m.data.map(function(x){return x.id});renderModels(m.data)}catch(e){$('models').textContent='Models load failed: '+e.message}}
 function renderModels(list){$('models').innerHTML='<table><thead><tr><th>API model id</th><th>Upstream agent</th><th>State</th><th></th></tr></thead><tbody>'+list.map(function(x){var pill=x.disabled?'<span class="pill bad">disabled</span>':'<span class="pill ok">enabled</span>';var btn=x.disabled?'<button class="ghost small" onclick="toggleModel(\\''+esc(x.id)+'\\',false)">Enable</button>':'<button class="ghost small" onclick="toggleModel(\\''+esc(x.id)+'\\',true)">Disable</button>';return '<tr><td><code>'+esc(x.id)+'</code></td><td><code>'+esc(x.agent)+'</code></td><td>'+pill+'</td><td>'+btn+'</td></tr>'}).join('')+'</tbody></table>'}
 async function toggleModel(id,disabled){try{var r=await fetch('/admin/models/toggle',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({model:id,disabled:disabled})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}STORE_MODELS=null;MODEL_IDS=(j.data||[]).map(function(x){return x.id});renderModels(j.data||[]);setStatus('Model '+id+' '+(disabled?'disabled':'enabled'),'ok')}catch(e){setStatus(e.message,'err')}}
+async function addKey(){var k=$('newKey').value.trim();var lim=parseInt($('newKeyLimit').value||'0',10);if(!k){setStatus('Enter a key first','err');return}try{var r=await fetch('/admin/keys',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({action:'add',key:k,limit:isFinite(lim)?lim:0})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}$('newKey').value='';$('newKeyLimit').value='';loadAll(false);setStatus('Key added','ok')}catch(e){setStatus(e.message,'err')}}
+async function removeKey(prefix){var k=prompt('Full key to remove (first 8: '+prefix+')','');if(!k)return;try{var r=await fetch('/admin/keys',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({action:'remove',key:k})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}loadAll(false);setStatus('Key removed','ok')}catch(e){setStatus(e.message,'err')}}
+async function toggleKey(prefix,action){var k=prompt('Full key to '+(action==='disable'?'disable':'enable')+' (first 8: '+prefix+')','');if(!k)return;try{var r=await fetch('/admin/keys',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({action:action,key:k})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}loadAll(false);setStatus('Key '+(action==='disable'?'disabled':'enabled'),'ok')}catch(e){setStatus(e.message,'err')}}
+async function testAlert(){try{var r=await fetch('/admin/alerts/test',{method:'POST',headers:authHeaders()});var j=await r.json();$('alertResult').textContent=j.ok?'sent':'failed: '+(j.error||'');$('alertResult').style.color=j.ok?'var(--ok)':'var(--err)'}catch(e){$('alertResult').textContent='error: '+e.message}}
+async function toggleMaint(){try{var r=await fetch('/admin/maintenance',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({on:$('maintState').textContent==='off'})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}$('maintState').textContent=j.maintenance?'on':'off';$('maintBtn').textContent=j.maintenance?'Disable':'Enable';setStatus('Maintenance '+(j.maintenance?'on':'off'),'ok')}catch(e){setStatus(e.message,'err')}}
+async function loadState(){try{var s=await get('/admin/state');var rows=(s.accounts||[]).map(function(a){var cd=a.cooldown_until?'<span class="pill warn">'+a.cooldown_seconds+'s</span>':'<span class="muted">-</span>';var al=a.last_alerted_at?(a.last_alerted_at||'').slice(11,19):'-';var sess=(a.sessions||[]).map(function(x){return '<div class="muted">'+esc(x.model)+' <span class="muted">exp '+((x.expiresAt||'').slice(11,19)||'?')+'</span></div>'}).join('')||'<span class="muted">-</span>';return '<tr><td><code>'+esc(a.token_prefix)+'&hellip;</code></td><td>'+(a.alive===true?'<span class="pill ok">alive</span>':a.alive===false?'<span class="pill bad">dead</span>':'<span class="pill unk">?</span>')+'</td><td>'+cd+'</td><td>'+al+'</td><td>'+sess+'</td></tr>'}).join('');$('stateTable').innerHTML='<table><thead><tr><th>Account</th><th>Alive</th><th>Cooldown</th><th>Last alert</th><th>Sessions</th></tr></thead><tbody>'+rows+'</tbody></table>'}catch(e){$('stateTable').innerHTML='<p class="muted">State load failed: '+esc(e.message)+'</p>'}}
+function setAccent(c,save){document.documentElement.style.setProperty('--accent',c);if(save!==true)localStorage.setItem('f2a-accent',c);var dots=document.querySelectorAll('.accdot');dots.forEach(function(d){d.style.background=d.dataset.c===c?'':'none'})}
 function csvEscape(s){s=String(s==null?'':s);return s.indexOf('"')>=0||s.indexOf(',')>=0?'"'+s.replace(/"/g,'""')+'"':s}
 function exportCsv(){var u=LAST_USAGE;if(!u){setStatus('Load data first','err');return}var lines=['date,requests,successes,errors,input_chars,output_chars'];(u.days||[]).forEach(function(d){lines.push([d.date,d.requests,d.successes,d.errors,d.inputChars||0,d.outputChars||0].join(','))});lines.push('');lines.push('model,requests,successes,errors');Object.keys(u.by_model||{}).forEach(function(m){var v=u.by_model[m];lines.push([csvEscape(m),v.requests,v.successes,v.errors].join(','))});lines.push('');lines.push('key,limit,today_requests');(u.keys||[]).forEach(function(k){lines.push([csvEscape(k.prefix),k.limit||'',k.today_requests].join(','))});var blob=new Blob([lines.join(String.fromCharCode(10))],{type:'text/csv'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='freebuff2api-usage.csv';document.body.appendChild(a);a.click();a.remove();setStatus('CSV downloaded','ok')}
-boot();loadModels();
+boot();loadModels();setInterval(function(){if(KEY&&!REFRESHING)loadAll(false)},30000);
 </script>`;
 }function adminPageResponse() {
   return new Response(pageShell("freebuff2api console - admin", adminBody()), { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders() } });
@@ -1311,18 +1403,39 @@ function responsesInputToMessages(input, instructions) {
 
 // chat completions  responses ： + session/run  + /
 async function executeChat(env, chatParams, mc, isStream, mode, apiKey) {
+  if (await isMaintenance(env)) {
+    return jsonResponse({ error: { message: "Bridge in maintenance mode", type: "maintenance" } }, 503);
+  }
   if (await isModelDisabled(env, mc.id)) {
     return jsonResponse({ error: { message: "Model disabled: " + mc.id, type: "model_not_found" } }, 404);
   }
   const keyId = keyAccountId(apiKey);
+  const reqStarted = Date.now();
+  let usedAcct = null;
   const limit = keyLimit(env, apiKey);
   if (limit > 0 && (await keyTodayUsed(env, keyId)) >= limit) {
     return jsonResponse({ error: { message: "Daily request limit reached for key " + keyPrefixOf(apiKey) + "... (limit " + limit + ")", type: "rate_limit_error" } }, 429);
+  }
+  if (!keyModelAllowed(env, apiKey, mc.id)) {
+    return jsonResponse({ error: { message: "Model not allowed for this key: " + mc.id, type: "permission_error" } }, 403);
+  }
+  const modelLimit = modelLimitOf(env, mc.id);
+  if (modelLimit > 0 && (await modelTodayUsed(env, mc.id)) >= modelLimit) {
+    return jsonResponse({ error: { message: "Daily model limit reached for " + mc.id + " (limit " + modelLimit + ")", type: "rate_limit_error" } }, 429);
   }
   await maybeFlush(env);
   const debug = env.FREEBUFF_DEBUG === "true";
   const pool = parseAccounts(env);
   if (pool.length === 0) return jsonResponse({ error: { message: " FREEBUFF_TOKEN ", type: "config_error" } }, 503);
+
+  const nowMs = Date.now();
+  const warm = pool.some((a) => !cooldowns.has(a.token) || cooldowns.get(a.token) <= nowMs);
+  if (!warm) {
+    let minUntil = Infinity;
+    for (const a of pool) { const u = cooldowns.get(a.token) || nowMs; if (u < minUntil) minUntil = u; }
+    const retryAfter = Math.max(1, Math.ceil((minUntil - nowMs) / 1000));
+    return jsonResponse({ error: { message: "All Freebuff accounts cooling down; retry later", type: "rate_limit_error", retry_after: retryAfter } }, 429, { "Retry-After": String(retryAfter) });
+  }
 
   bump("requests", 1, mc, keyId);
   bump("inputChars", estimateInputChars(chatParams.messages), mc, keyId);
@@ -1335,6 +1448,7 @@ async function executeChat(env, chatParams, mc, isStream, mode, apiKey) {
     const token = acct ? acct.token : null;
     if (!token) break;
     recordAccountUse(token);
+    usedAcct = token;
     try {
       // 1) session
       const sess = await createSession(token, mc.session);
@@ -1400,6 +1514,7 @@ async function executeChat(env, chatParams, mc, isStream, mode, apiKey) {
         const { readable, writable } = new TransformStream();
         if (mode === "responses") pipeUpstreamToResponsesStream(resp.body, writable, mc);
         else pipeUpstreamToClient(resp.body, writable);
+        logRequest({ t: new Date().toISOString(), model: mc.id, key: keyPrefixOf(apiKey), mode, status: 200, ms: Date.now() - reqStarted, acct: usedAcct ? usedAcct.slice(0, 8) : null });
         return new Response(readable, { status: 200, headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...corsHeaders() } });
       }
 
@@ -1407,12 +1522,14 @@ async function executeChat(env, chatParams, mc, isStream, mode, apiKey) {
         const rr = await responsesToNonStream(resp.body, mc);
         bump("successes", 1, mc, keyId);
         bump("outputChars", outputCharsOf(rr), mc, keyId);
+        logRequest({ t: new Date().toISOString(), model: mc.id, key: keyPrefixOf(apiKey), mode, status: 200, ms: Date.now() - reqStarted, acct: usedAcct ? usedAcct.slice(0, 8) : null });
         return jsonResponse(rr, 200);
       }
 
       const agg = await streamToNonStream(resp.body, mc.upstream);
       bump("successes", 1, mc, keyId);
       bump("outputChars", outputCharsOf(agg), mc, keyId);
+      logRequest({ t: new Date().toISOString(), model: mc.id, key: keyPrefixOf(apiKey), mode, status: 200, ms: Date.now() - reqStarted, acct: usedAcct ? usedAcct.slice(0, 8) : null });
       return jsonResponse(agg, 200);
     } catch (e) {
       recordAccountError(token, 0, String(e.message || e));
@@ -1430,6 +1547,7 @@ async function executeChat(env, chatParams, mc, isStream, mode, apiKey) {
     }
   }
   if (lastErrMsg) bump("errors", 1, mc, keyId);
+  logRequest({ t: new Date().toISOString(), model: mc.id, key: keyPrefixOf(apiKey), mode, status: 502, ms: Date.now() - reqStarted, acct: usedAcct ? usedAcct.slice(0, 8) : null });
   return jsonResponse({ error: { message: lastErrMsg, type: "api_error" } }, 502);
 }
 
@@ -1800,7 +1918,7 @@ function getApiKey(request, env) {
   const auth = request.headers.get("Authorization") || "";
   const key = (auth.startsWith("Bearer ") ? auth.slice(7) : request.headers.get("x-api-key") || "").trim();
   if (!key) return null;
-  return key === (env.FREEBUFF_ADMIN_KEY || "").trim() || parseApiKeys(env).some((x) => x.key === key) ? key : null;
+  return key === (env.FREEBUFF_ADMIN_KEY || "").trim() || allKeys(env).some((x) => x.enabled !== false && x.key === key) ? key : null;
 }
 
 function jsonResponse(obj, status, extraHeaders = {}) {
@@ -1905,6 +2023,10 @@ function bump(field, n, mc, keyId) {
   const dd = usageStats.byDay.get(date) || { requests: 0, successes: 0, errors: 0, inputChars: 0, outputChars: 0 };
   dd[field] = (dd[field] || 0) + n;
   usageStats.byDay.set(date, dd);
+  const hh = String(new Date().getUTCHours()).padStart(2, "0");
+  const hd = usageStats.byHour.get(date + "\u0000" + hh) || { requests: 0, successes: 0, errors: 0 };
+  hd[field] = (hd[field] || 0) + n;
+  usageStats.byHour.set(date + "\u0000" + hh, hd);
 }
 
 function estimateInputChars(messages) {
@@ -1955,13 +2077,15 @@ async function flushDeltas(env) {
   const byDay = [...usageStats.byDay.entries()];
   const byDayModel = [...usageStats.byDayModel.entries()];
   const byKey = [...usageStats.byKey.entries()];
-  if (snap.requests === 0 && byModel.length === 0 && byDay.length === 0 && byDayModel.length === 0 && byKey.length === 0) return;
+  const byHour = [...usageStats.byHour.entries()];
+  if (snap.requests === 0 && byModel.length === 0 && byDay.length === 0 && byDayModel.length === 0 && byKey.length === 0 && byHour.length === 0) return;
   usageStats.requests = 0; usageStats.successes = 0; usageStats.errors = 0;
   usageStats.inputChars = 0; usageStats.outputChars = 0;
   usageStats.byModel = new Map();
   usageStats.byDay = new Map();
   usageStats.byDayModel = new Map();
   usageStats.byKey = new Map();
+  usageStats.byHour = new Map();
   const s = await getStore(env);
   const ops = [];
   const add = (key, n) => { if (n) ops.push({ key, n, p: s.sum(key, n) }); };
@@ -1978,6 +2102,10 @@ async function flushDeltas(env) {
     const date = k.slice(0, idx), keyId = k.slice(idx + 1);
     addObj(["usage", "day", date, "key", keyId], v);
     addObj(["usage", "key", keyId], v);
+  }
+  for (const [k, v] of byHour) {
+    const idx = k.lastIndexOf("\u0000");
+    addObj(["usage", "hour", k.slice(0, idx), k.slice(idx + 1)], v);
   }
   // Persist each op; restore ONLY the ops that failed so a partial failure cannot
   // double-count already-committed sums on the next flush.
@@ -1998,6 +2126,12 @@ async function flushDeltas(env) {
     const idx = k.lastIndexOf("\u0000");
     const date = k.slice(0, idx), keyId = k.slice(idx + 1);
     const b = keyBase.get(keyId);
+    if (b && b.date === date) b.requests += v.requests;
+  }
+  for (const [k, v] of byDayModel) {
+    const idx = k.lastIndexOf("\u0000");
+    const date = k.slice(0, idx), id = k.slice(idx + 1);
+    const b = modelBase.get(id);
     if (b && b.date === date) b.requests += v.requests;
   }
   lastFlushAt = Date.now();
@@ -2023,6 +2157,7 @@ function restoreDelta(key, n) {
       else mergeDelta(usageStats.byDay, key[2], key[3], n);
       return;
     }
+    if (key[1] === "hour") { mergeDelta(usageStats.byHour, key[2] + "\u0000" + key[3], key[4], n); return; }
     if (key[1] === "key") mergeDelta(usageStats.byKey, todayStr() + "\u0000" + key[2], key[3], n);
   } catch {}
 }
@@ -2057,8 +2192,31 @@ function parseApiKeys(env) {
 }
 
 function keyLimit(env, key) {
-  const k = parseApiKeys(env).find((x) => x.key === key);
+  const k = allKeys(env).find((x) => x.key === key);
   return k ? k.limit : 0;
+}
+
+// KV-managed keys (admin UI): seeded from KV, merged over env keys. Hot path stays sync.
+const extraKeys = []; // {key, limit, enabled, kv}
+let keyRegistryLoaded = false;
+async function ensureKeyRegistry(env) {
+  if (keyRegistryLoaded) return;
+  keyRegistryLoaded = true;
+  try {
+    const s = await getStore(env);
+    for (const e of await s.list(["keys"])) {
+      try {
+        const v = typeof e.value === "string" ? JSON.parse(e.value) : e.value;
+        extraKeys.push({ key: String(e.key[1]), limit: (v && v.limit) || 0, enabled: v ? v.enabled !== false : true, kv: true });
+      } catch {}
+    }
+  } catch {}
+}
+function allKeys(env) {
+  const base = parseApiKeys(env).map((k) => ({ key: k.key, limit: k.limit, enabled: true, kv: false }));
+  const seen = new Set(base.map((k) => k.key));
+  for (const k of extraKeys) if (!seen.has(k.key)) base.push(k);
+  return base;
 }
 
 // Admin routes (/admin/usage, /admin/accounts, /admin/models/toggle) require the
@@ -2181,4 +2339,197 @@ function checkDeadAlert(env, token) {
   if (last && Date.now() - last < ALERT_COOLDOWN_MS) return;
   alerted.set(token, Date.now());
   notify(env, "[freebuff2api] account " + String(token).slice(0, 8) + "... is dead (invalid token or login expired).");
+}
+
+// ---------------------------------------------------------------------------
+// v1.8.2 admin features: request log, maintenance, state, alerts, keys, limits
+// ---------------------------------------------------------------------------
+
+// --- request log (in-memory ring buffer, admin /admin/log) ---
+const requestLog = [];
+const REQUEST_LOG_MAX = 50;
+function logRequest(entry) {
+  requestLog.push(entry);
+  if (requestLog.length > REQUEST_LOG_MAX) requestLog.shift();
+}
+function percentile(arr, p) {
+  if (!arr || !arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.floor(p * s.length))];
+}
+function handleAdminLog() {
+  const entries = requestLog.map((e) => ({ ...e })).reverse();
+  const modelTimes = {};
+  const modelStats = {};
+  for (const e of requestLog) {
+    const m = modelStats[e.model] = modelStats[e.model] || { n: 0, ok: 0, err: 0 };
+    m.n++;
+    if (e.status < 400) m.ok++; else m.err++;
+    (modelTimes[e.model] = modelTimes[e.model] || []).push(e.ms);
+  }
+  const by_model_latency = {};
+  for (const [model, arr] of Object.entries(modelTimes)) {
+    by_model_latency[model] = { n: arr.length, p50: percentile(arr, 0.5), p95: percentile(arr, 0.95), ok: modelStats[model].ok, err: modelStats[model].err };
+  }
+  return jsonResponse({ entries, by_model_latency, version: VERSION, time: new Date().toISOString() }, 200);
+}
+
+// --- maintenance mode (KV flag + env) ---
+async function isMaintenance(env) {
+  if ((env.FREEBUFF_MAINTENANCE || "").trim() === "true") return true;
+  const s = await getStore(env);
+  return !!(await s.get(["maintenance", "enabled"]));
+}
+async function handleMaintenance(request, env) {
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: { message: "Invalid JSON", type: "parse_error" } }, 400); }
+  if (!body || typeof body.on !== "boolean") return jsonResponse({ error: { message: "on (boolean) required", type: "invalid_request_error" } }, 400);
+  const s = await getStore(env);
+  if (body.on) await s.put(["maintenance", "enabled"], 1);
+  else await s.del(["maintenance", "enabled"]);
+  return jsonResponse({ maintenance: body.on, version: VERSION }, 200);
+}
+
+// --- session/cooldown state inspector (/admin/state, current isolate only) ---
+function handleAdminState(env) {
+  const now = Date.now();
+  const pool = parseAccounts(env);
+  const accounts = pool.map((a) => {
+    const cd = cooldowns.get(a.token);
+    const al = alerted.get(a.token);
+    const h = acctHealth.get(a.token);
+    const sessions = [];
+    for (const [k, v] of sessCache) {
+      if (k.startsWith(a.token + ":")) sessions.push({ model: k.slice(a.token.length + 1), instanceId: v.instanceId, expiresAt: v.expiresAt || null });
+    }
+    return {
+      token_prefix: a.token.slice(0, 8),
+      cooldown_until: cd && cd > now ? new Date(cd).toISOString() : null,
+      cooldown_seconds: cd && cd > now ? Math.ceil((cd - now) / 1000) : 0,
+      last_alerted_at: al ? new Date(al).toISOString() : null,
+      alive: h ? h.alive : null,
+      sessions,
+    };
+  });
+  return jsonResponse({ accounts, scope: "current isolate", time: new Date().toISOString(), version: VERSION }, 200);
+}
+
+// --- alert test (/admin/alerts/test) ---
+async function handleAlertTest(env) {
+  try {
+    await notify(env, "[freebuff2api] test alert - channels OK");
+    return jsonResponse({ ok: true, time: new Date().toISOString() }, 200);
+  } catch (e) {
+    return jsonResponse({ ok: false, error: String(e.message || e) }, 500);
+  }
+}
+
+// --- threshold alerts (checked on admin usage reads, deduped per day) ---
+const thresholdAlerts = new Map(); // "rule:date" -> true
+async function checkThresholds(env) {
+  const webhook = env.FREEBUFF_ALERT_WEBHOOK;
+  const tg = (env.FREEBUFF_TG_BOT_TOKEN || "").trim() && (env.FREEBUFF_TG_CHAT_ID || "").trim();
+  if (!webhook && !tg) return;
+  const today = todayStr();
+  const s = await getStore(env);
+  const requests = (await s.get(["usage", "total", "requests"])) || 0;
+  const errors = (await s.get(["usage", "total", "errors"])) || 0;
+  if (requests >= 20) {
+    const rate = errors / requests;
+    const t = parseFloat(env.FREEBUFF_ALERT_ERR_RATE || "0.2");
+    if (rate >= t && !thresholdAlerts.has("err:" + today)) {
+      thresholdAlerts.set("err:" + today, true);
+      notify(env, "[freebuff2api] error rate " + Math.round(rate * 100) + "% >= " + Math.round(t * 100) + "% (" + errors + "/" + requests + ")");
+    }
+  }
+  const qt = parseFloat(env.FREEBUFF_ALERT_QUOTA || "0.9");
+  for (const a of parseAccounts(env)) {
+    const info = await probeAccount(a.token);
+    if (!info || !info.quota) continue;
+    for (const [model, v] of Object.entries(info.quota)) {
+      const used = typeof v.recentCount === "number" ? v.recentCount : typeof v.used === "number" ? v.used : null;
+      const lim = typeof v.limit === "number" ? v.limit : null;
+      if (used != null && lim > 0 && used / lim >= qt) {
+        const key = "quota:" + a.token.slice(0, 8) + ":" + model + ":" + today;
+        if (!thresholdAlerts.has(key)) {
+          thresholdAlerts.set(key, true);
+          notify(env, "[freebuff2api] quota " + Math.round((used / lim) * 100) + "% on " + model + " (" + used + "/" + lim + ") account " + a.token.slice(0, 8) + "...");
+        }
+      }
+    }
+  }
+}
+
+// --- model daily limits + key x model allowlist (env-configured) ---
+const modelBase = new Map(); // model id -> { date, requests }
+function modelLimitOf(env, id) {
+  const raw = (env.FREEBUFF_MODEL_LIMITS || "").trim();
+  if (!raw) return 0;
+  for (const part of raw.split(",")) {
+    const m = part.match(/^([^:]+):(\d+)$/);
+    if (m && m[1] === id) return parseInt(m[2], 10);
+  }
+  return 0;
+}
+function keyModelAllowed(env, key, model) {
+  const raw = (env.FREEBUFF_KEY_MODELS || "").trim();
+  if (!raw) return true;
+  for (const part of raw.split(";")) {
+    const ci = part.indexOf(":");
+    if (ci <= 0) continue;
+    const k = part.slice(0, ci), list = part.slice(ci + 1);
+    if (k === key) return list.split(",").map((x) => x.trim()).filter(Boolean).includes(model);
+  }
+  return true; // key not listed -> unrestricted
+}
+async function modelTodayUsed(env, id) {
+  const date = todayStr();
+  let b = modelBase.get(id);
+  if (!b || b.date !== date) {
+    const s = await getStore(env);
+    b = { date, requests: (await s.get(["usage", "day", date, "model", id, "requests"])) || 0 };
+    modelBase.set(id, b);
+  }
+  const d = usageStats.byDayModel.get(date + "\u0000" + id);
+  return b.requests + (d ? d.requests : 0);
+}
+
+// --- KV-backed key management (/admin/keys: add|remove|limit|disable|enable) ---
+async function handleAdminKeys(request, env) {
+  await ensureKeyRegistry(env);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: { message: "Invalid JSON", type: "parse_error" } }, 400); }
+  const action = body && body.action;
+  const key = body && typeof body.key === "string" ? body.key.trim() : "";
+  const limit = body && typeof body.limit === "number" && body.limit >= 0 ? Math.floor(body.limit) : 0;
+  const s = await getStore(env);
+  const list = () => allKeys(env).map((k) => ({ prefix: keyPrefixOf(k.key), limit: k.limit || null, enabled: k.enabled !== false, managed: !!k.kv }));
+  if (action === "add") {
+    if (key.length < 4) return jsonResponse({ error: { message: "key too short", type: "invalid_request_error" } }, 400);
+    if (allKeys(env).some((k) => k.key === key)) return jsonResponse({ error: { message: "key already exists", type: "invalid_request_error" } }, 400);
+    extraKeys.push({ key, limit, enabled: true, kv: true });
+    await s.put(["keys", key], JSON.stringify({ limit, enabled: true }));
+    return jsonResponse({ keys: list(), version: VERSION }, 200);
+  }
+  if (action === "remove") {
+    const i = extraKeys.findIndex((k) => k.key === key);
+    if (i >= 0) extraKeys.splice(i, 1);
+    await s.del(["keys", key]);
+    return jsonResponse({ keys: list(), version: VERSION }, 200);
+  }
+  const entry = allKeys(env).find((k) => k.key === key);
+  if (!entry) return jsonResponse({ error: { message: "unknown key", type: "invalid_request_error" } }, 400);
+  if (action === "limit") {
+    if (!entry.kv) return jsonResponse({ error: { message: "env-managed key: set limit via FREEBUFF_API_KEYS", type: "invalid_request_error" } }, 400);
+    entry.limit = limit;
+    await s.put(["keys", key], JSON.stringify({ limit, enabled: entry.enabled }));
+    return jsonResponse({ keys: list(), version: VERSION }, 200);
+  }
+  if (action === "disable" || action === "enable") {
+    if (!entry.kv) return jsonResponse({ error: { message: "env-managed key: cannot disable", type: "invalid_request_error" } }, 400);
+    entry.enabled = action === "enable";
+    await s.put(["keys", key], JSON.stringify({ limit: entry.limit, enabled: entry.enabled }));
+    return jsonResponse({ keys: list(), version: VERSION }, 200);
+  }
+  return jsonResponse({ error: { message: "action must be add|remove|limit|disable|enable", type: "invalid_request_error" } }, 400);
 }
