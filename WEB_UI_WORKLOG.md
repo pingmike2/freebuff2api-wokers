@@ -108,6 +108,18 @@ New dashboard features (from agent brainstorm, all additive to existing response
 - Header badges: `store: deno_kv|cf_kv|memory` + flush health + alert channels (`adminStatus` additive fields)
 - `readDays` removed (inlined into handleAdminUsage single KV pass)
 
+## v1.8.2 features (2026-08-10, DEPLOYED + live-verified)
+
+- `/admin/log`: last-50 request ring buffer (time/model/key/status/ms/account) + per-model p50/p95
+- `/admin/state`: cooldowns, last alert, live sessions (current isolate)
+- `/admin/maintenance` (KV) + `/admin/alerts/test` + `/admin/keys` (add/remove/limit/disable/enable, KV-managed)
+- Global cooldown gate: all accounts cooling -> 429 + Retry-After (protects upstream from hammering)
+- `FREEBUFF_MODEL_LIMITS` (model:limit) + `FREEBUFF_KEY_MODELS` (key:model,model) allowlist
+- Threshold alerts (err-rate + quota-%, deduped/day) on admin reads
+- Quota `reset_at`/`reset_time_zone` passthrough; hourly heatmap (KV `usage/hour` sums)
+- Client: log table, latency cards, auto-refresh 30s, 7/14/30d range, accent switcher (localStorage), auth-card collapse after connect, System tab, tighter spacing
+- **Gotcha fixed live**: hourly heatmap must read the `usage/hour` KV prefix — the first live check returned empty hours because they were aggregated from the day-key list. Caught by post-deploy verification; fixed + redeployed (33/33 tests).
+
 ## KV on the NEW Deno Deploy platform (console.deno.com) — gotchas
 
 - Deno KV is a **separate "database" resource**: `deno deploy database provision freebuff2api-kv --kind denokv --org hknerdr`, then `deno deploy database assign freebuff2api-kv --org hknerdr --app freebuff2api-prod`, then redeploy. Without this, `Deno.openKv()` fails and the store falls back to in-memory (counters reset on restart).
