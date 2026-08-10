@@ -2,25 +2,25 @@ node_modules/
 .dev.vars
 test/worker_tmp.mjs
 
-# 凭证/token 文件，绝不提交
+# /token ，
 freebuff_tools/freebuff_credentials.json
 **/freebuff_credentials.json
 __pycache__/
 test/
 
-# 部署脚本含凭据读取逻辑，仅本地使用，不推送
+# ，，
 /credentials.yaml
 /deploy.sh
 
-# 更新记录本地自用，不推送 GitHub
+# ， GitHub
 CHANGELOG.md
 
-# wrangler 本地缓存/状态，不提交
+# wrangler /，
 .wrangler/
 
-# ⚠️ wrangler.toml 含敏感变量（FREEBUFF_TOKEN 等），绝不提交 GitHub
+# ⚠️ wrangler.toml （FREEBUFF_TOKEN ）， GitHub
 wrangler.toml
 
-# ⚠️ .env 及所有带真实变量值的文件，绝不提交
+# ⚠️ .env ，
 .env
 .env.*

@@ -1,0 +1,14 @@
+# Yerel geliştirme için örnek (wrangler dev testi için).
+# BU DOSYAYI kimseyle paylaşma! Gerçek deploy'ta secret olarak girilir.
+# Kopyala:  cp .dev.vars.example .dev.vars
+FREEBUFF_TOKEN=xxx
+FREEBUFF_API_KEY=freebuff-default-key
+# Opsiyonel (v1.8.0):
+# FREEBUFF_API_KEYS=key1:100,key2            # :limit = günlük istek limiti
+# FREEBUFF_ADMIN_KEY=admin-secret            # kurulursa /admin/* sadece bu anahtarla
+# FREEBUFF_DEFAULT_MODEL=deepseek/deepseek-v4-flash
+# FREEBUFF_DISABLED_MODELS=openai/gpt-5.6-luna
+# FREEBUFF_ALERT_WEBHOOK=https://example.com/hook
+# FREEBUFF_TG_BOT_TOKEN=xxx
+# FREEBUFF_TG_CHAT_ID=xxx
+# FREEBUFF_DEBUG=true

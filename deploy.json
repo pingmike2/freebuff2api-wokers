@@ -1,0 +1,13 @@
+{
+  "org": "hknerdr",
+  "app": "freebuff2api-prod",
+  "region": "us",
+  "runtimeMode": {
+    "manual": {
+      "entrypoint": "./deno_deploy/entry.js"
+    }
+  },
+  "src": {
+    "source": "local"
+  }
+}
