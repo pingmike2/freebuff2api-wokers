@@ -94,34 +94,27 @@ Two review agents (code + security) ran against the v1.8.0 surface. All actionab
   env default model, dead-account alert via chat 401 + cooldown dedupe + silent /healthz
   (ABUSE-001), accounts history, client JS in `vm` sandbox (boot/loadAll/chart/toggleModel/landing curl).
 
-## Live status
+## Live status (2026-08-10, DEPLOYED)
 
-- Live base: `https://freebuff2api-prod.hknerdr.deno.net`.
-- `/healthz` → 200 `1.7.1-anthropic` (stale revision); `/`, `/admin`, `/admin/status` → 401
-  `Invalid API key` — the deployed revision predates the public-route change. **Not a code bug.**
-- Deployment from this environment is impossible (no `deno`, `deployctl`). A **user must redeploy**.
+- **v1.8.0 CANLI**: `https://freebuff2api-prod.hknerdr.deno.net`
+  - `/healthz` → `1.8.0`, 5/5 hesap canlı; `/admin`, `/` → 200 HTML; `/admin/status` → custom auth, key_count 1
+  - `/admin/usage` key'li → 200 (sayaçlar canlı trafiği sayıyor); key'siz → 401
+- Deploy artık **eski deployctl/dash.deno.com ile DEĞİL**: Deno Deploy Classic (dash.deno.com) 2026-07-20'de kapatıldı.
+  **Yeni yol: deno'ya gömülü `deno deploy`** (console.deno.com platformu):
+  ```bash
+  deno deploy --json --non-interactive --token="$DENO_DEPLOY_TOKEN" \
+    --org=hknerdr --app=freebuff2api-prod --prod --ignore=.git
+  ```
+  Token: console.deno.com hesap token'ları; `--token` veya `DENO_DEPLOY_TOKEN` env. `deno deploy whoami` ile doğrulanır.
+- Env'ler (FREEBUFF_TOKEN / FREEBUFF_API_KEY) yeni platformda korundu; `deno deploy env list` ile görülür.
 
 ## NEXT STEPS (for the next agent / the user)
 
-1. **User redeploys** to Deno Deploy:
-   - entrypoint: `./deno_deploy/entry.js`
-   - env vars: `FREEBUFF_TOKEN`, `FREEBUFF_API_KEY` (optionally `FREEBUFF_API_KEYS`,
-     `FREEBUFF_ADMIN_KEY`, `FREEBUFF_DEFAULT_MODEL`, `FREEBUFF_DISABLED_MODELS`,
-     `FREEBUFF_ALERT_WEBHOOK`, `FREEBUFF_TG_BOT_TOKEN`/`FREEBUFF_TG_CHAT_ID`)
-   - Deno Deploy provides Deno KV automatically — no extra provisioning for usage persistence.
-2. Verify live:
-   ```bash
-   curl -i https://freebuff2api-prod.hknerdr.deno.net/healthz          # expect 1.8.0
-   curl -i https://freebuff2api-prod.hknerdr.deno.net/admin            # expect 200 HTML (public)
-   curl -i https://freebuff2api-prod.hknerdr.deno.net/admin/status     # expect key_count etc.
-   curl -i https://freebuff2api-prod.hknerdr.deno.net/admin/usage -H 'Authorization: Bearer YOUR_KEY'   # days/keys arrays
-   curl -i https://freebuff2api-prod.hknerdr.deno.net/admin/usage      # 401 (expected)
-   ```
-3. If `/admin` still 401s after redeploy: purge stale Deno Deploy revisions / confirm entrypoint,
-   re-check `/healthz.version`.
-4. Manual UI pass: Overview cards + 14-day chart + keys table; Accounts columns; Models toggle;
+1. ✅ Deploy done (2026-08-10, revision `3rpw3fnw6y4t`) via `deno deploy` (new console.deno.com CLI).
+2. Manual UI pass: Overview cards + 14-day chart + keys table; Accounts columns; Models toggle;
    auth card (wrong key → banner).
-5. Optional: run `/tmp/test_v18.mjs` again after any further worker edits.
+3. Optional: run `/tmp/test_v18.mjs` again after any further worker edits, then redeploy with the
+   command above (`--prod`; no `--env` flags → project env preserved).
 
 ## Known limitations
 
