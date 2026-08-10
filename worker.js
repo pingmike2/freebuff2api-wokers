@@ -637,7 +637,10 @@ export default {
     if (request.method === "GET" && url.pathname === "/admin/models") return jsonResponse(await adminModels(env), 200, { "X-Freebuff2api-Version": VERSION });
 
     const key = getApiKey(request, env);
-    if (!key) return jsonResponse({ error: { message: "Invalid API key", type: "auth_error" } }, 401);
+    if (!key) {
+      if (url.pathname === "/v1/messages" || url.pathname === "/messages") return anthropicError("Invalid API key", "authentication_error", 401);
+      return jsonResponse({ error: { message: "Invalid API key", type: "auth_error" } }, 401);
+    }
 
     cleanCache();
 
@@ -681,6 +684,9 @@ export default {
     }
     if (request.method === "POST" && (url.pathname === "/v1/responses" || url.pathname === "/responses")) {
       return handleResponses(request, env, key);
+    }
+    if (request.method === "POST" && (url.pathname === "/v1/messages/count_tokens" || url.pathname === "/messages/count_tokens")) {
+      return handleCountTokens(request, env);
     }
     if (request.method === "POST" && (url.pathname === "/v1/messages" || url.pathname === "/messages")) {
       return handleMessages(request, env, key);
@@ -1645,6 +1651,7 @@ function anthropicContentToChat(content) {
 
 function anthropicToChatParams(body, mc) {
   const chat = { model: mc.id, stream: !!body.stream, messages: [] };
+  if (body.stream) chat.stream_options = { include_usage: true };
   let sysText = typeof body.system === "string" ? body.system : "";
   if (Array.isArray(body.system)) {
     sysText = body.system
@@ -1678,7 +1685,8 @@ function anthropicToChatParams(body, mc) {
       }));
     const tc = body.tool_choice;
     if (tc) {
-      if (tc.type === "auto" || tc.type === "any") chat.tool_choice = "auto";
+      if (tc.type === "auto") chat.tool_choice = "auto";
+      else if (tc.type === "any") chat.tool_choice = "required"; // Anthropic any = model MUST call a tool; OpenAI equivalent is "required"
       else if (tc.type === "none") chat.tool_choice = "none";
       else if (tc.type === "tool" && tc.name) chat.tool_choice = { type: "function", function: { name: tc.name } };
     }
@@ -1689,14 +1697,18 @@ function anthropicToChatParams(body, mc) {
     if (m.role === "user") {
       const hasToolResult = Array.isArray(m.content) && m.content.some((c) => c && c.type === "tool_result");
       if (hasToolResult) {
+        const textParts = [];
         for (const part of m.content) {
           if (!part || typeof part !== "object") continue;
           if (part.type === "tool_result") {
             chat.messages.push({ role: "tool", tool_call_id: part.tool_use_id || "", content: anthropicContentToChat(part.content) });
           } else if (part.type === "text" && part.text) {
-            chat.messages.push({ role: "user", content: part.text });
+            textParts.push(part.text);
           }
         }
+        // OpenAI requires tool messages contiguous after the assistant tool_calls
+        // message; emit interleaved text AFTER them so tool_call_id linkage holds.
+        if (textParts.length) chat.messages.push({ role: "user", content: textParts.join("\n") });
       } else {
         chat.messages.push({ role: "user", content: anthropicContentToChat(m.content) });
       }
@@ -1768,6 +1780,9 @@ function openAIStreamToAnthropic(mc, includeThinking) {
   let blockIndex = -1;
   let openBlock = null; // { index, kind: "thinking" | "text" }
   const toolsOpen = new Map(); // OpenAI tool index -> Anthropic block index
+  let finalReason = "end_turn";
+  let totalInput = 0;
+  let totalOutput = 0;
 
   function evt(ctl, event, dataObj) {
     // Anthropic spec: data içinde "type" alanı event adıyla aynı olmalı (sub2api ile birebir)
@@ -1783,10 +1798,24 @@ function openAIStreamToAnthropic(mc, includeThinking) {
   function end(ctl) {
     if (ended) return;
     ended = true;
+    if (!started) {
+      evt(ctl, "message_start", {
+        message: {
+          id: "msg_" + Math.random().toString(36).slice(2, 12),
+          type: "message",
+          role: "assistant",
+          model: mc.id,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: totalInput, output_tokens: 0 },
+        },
+      });
+    }
     for (const [, bi] of toolsOpen) evt(ctl, "content_block_stop", { index: bi });
     toolsOpen.clear();
     closeOpen(ctl);
-    evt(ctl, "message_delta", { delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 0 } });
+    evt(ctl, "message_delta", { delta: { stop_reason: finalReason, stop_sequence: null }, usage: { output_tokens: totalOutput } });
     evt(ctl, "message_stop", {});
   }
   return new TransformStream({
@@ -1810,6 +1839,11 @@ function openAIStreamToAnthropic(mc, includeThinking) {
         } catch {
           continue;
         }
+        if (obj.usage) {
+          // OpenAI-compatible upstreams attach usage to the final chunk
+          totalInput = obj.usage.prompt_tokens || totalInput;
+          totalOutput = obj.usage.completion_tokens || totalOutput;
+        }
         const ch = obj.choices && obj.choices[0];
         if (!ch) continue;
         const d = ch.delta || {};
@@ -1824,7 +1858,7 @@ function openAIStreamToAnthropic(mc, includeThinking) {
               content: [],
               stop_reason: null,
               stop_sequence: null,
-              usage: { input_tokens: (obj.usage && obj.usage.prompt_tokens) || 0, output_tokens: 0 },
+              usage: { input_tokens: totalInput, output_tokens: 0 },
             },
           });
         }
@@ -1866,8 +1900,9 @@ function openAIStreamToAnthropic(mc, includeThinking) {
           }
         }
         if (ch.finish_reason) {
-          end(ctl);
-          break;
+          // OpenAI-compatible upstreams send usage in a trailing chunk AFTER the
+          // finish_reason chunk; keep consuming until [DONE]/flush so it lands.
+          finalReason = ch.finish_reason === "tool_calls" ? "tool_use" : ch.finish_reason === "length" ? "max_tokens" : "end_turn";
         }
       }
     },
@@ -1878,11 +1913,36 @@ function openAIStreamToAnthropic(mc, includeThinking) {
 }
 
 // Anthropic formatında hata gövdesi: {"type":"error","error":{"type","message"}}
-function anthropicError(message, type) {
-  return jsonResponse({ type: "error", error: { type: type || "api_error", message } }, type === "invalid_request_error" ? 400 : 500);
+function anthropicError(message, type, status, retryAfter) {
+  const st = status || (type === "invalid_request_error" ? 400 : 500);
+  const h = { ...corsHeaders() };
+  if (retryAfter) h["Retry-After"] = retryAfter;
+  return jsonResponse({ type: "error", error: { type: type || "api_error", message } }, st, h);
 }
 
 // Anthropic /v1/messages girişi: dönüştür → handleChat → geri çevir
+// Anthropic /v1/messages/count_tokens: tahmini sayım (upstream'e istek atmaz, kota yemez).
+// Claude Code / Anthropic SDK token tahmini ve auto-compaction için 404 yerine yaklaşık değer döner.
+function estimateTokens(o) {
+  if (typeof o === "string") return o.length;
+  if (Array.isArray(o)) return o.reduce((a, x) => a + estimateTokens(x), 0);
+  if (o && typeof o === "object") return Object.keys(o).reduce((a, k) => a + k.length + estimateTokens(o[k]), 0);
+  return 0;
+}
+async function handleCountTokens(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return anthropicError("Invalid JSON", "invalid_request_error");
+  }
+  const mc = MODELS.find((m) => m.id === anthropicModelToOpenAI(body.model, env)) || MODELS[0];
+  const chat = anthropicToChatParams(body, mc);
+  let n = estimateTokens(chat.messages) + estimateTokens(chat.system || "");
+  n = Math.ceil(n / 4);
+  return jsonResponse({ input_tokens: n }, 200);
+}
+
 async function handleMessages(request, env, apiKey) {
   let body;
   try {
@@ -1896,15 +1956,15 @@ async function handleMessages(request, env, apiKey) {
   // CPU optimizasyonu: fakeReq + JSON.stringify/parse yerine executeChat'i dogrudan cagir
   const resp = await executeChat(env, chatParams, mc, !!chatParams.stream, "chat", apiKey);
   if (resp.status >= 400) {
-    let msg = "Upstream error", typ = "api_error";
+    let msg = "Upstream error";
     try {
       const j = await resp.json();
-      if (j && j.error) {
-        msg = j.error.message || msg;
-        typ = j.error.type || typ;
-      }
+      if (j && j.error) msg = j.error.message || msg;
     } catch {}
-    return anthropicError(msg, typ);
+    // Anthropic error.type enum'u dışındaki tipleri (maintenance/config_error vs.)
+    // yayma; durum koduna göre standart tipe eşle, 429'da Retry-After'ı koru.
+    const typMap = { 400: "invalid_request_error", 401: "authentication_error", 403: "permission_error", 404: "not_found_error", 429: "rate_limit_error", 503: "overloaded_error" };
+    return anthropicError(msg, typMap[resp.status] || "api_error", resp.status, resp.headers.get("retry-after") || undefined);
   }
   if (!chatParams.stream) {
     let oai;
@@ -2035,6 +2095,8 @@ async function executeChat(env, chatParams, mc, isStream, mode, apiKey) {
   // ：（/429/428 /run ），。
   // （>1 、），。
   let lastErrMsg = "";
+  let lastStatus = 502;
+  let lastRetryAfter = null;
   for (let acctTry = 0; acctTry < pool.length; acctTry++) {
     const acct = pickToken(env, mc.session);
     const token = acct ? acct.token : null;
@@ -2096,7 +2158,14 @@ async function executeChat(env, chatParams, mc, isStream, mode, apiKey) {
       }
       if (!resp.ok) {
         recordAccountError(token, resp.status, errText);
-        lastErrMsg = "upstream error: " + (errText || "").slice(0, 300);
+        // Ölü hesap 401/403 gürültüsü yerine gerçek upstream hatasını öne çıkar:
+        // ilk hata kaydedilir, ama 401/403'ten sonraki gerçek hata (500/429 vs.) onu ezer.
+        if (!lastErrMsg || ((resp.status !== 401 && resp.status !== 403) && (lastStatus === 401 || lastStatus === 403))) {
+          lastErrMsg = "upstream error: " + (errText || "").slice(0, 300);
+          lastStatus = resp.status;
+          const ra = resp.headers.get("retry-after");
+          if (ra) lastRetryAfter = ra;
+        }
         if (debug) console.log(`[acct ${acctTry + 1}] failed ${resp.status}, switch account`);
         continue;
       }
@@ -2139,8 +2208,13 @@ async function executeChat(env, chatParams, mc, isStream, mode, apiKey) {
     }
   }
   if (lastErrMsg) bump("errors", 1, mc, keyId);
-  logRequest({ t: new Date().toISOString(), model: mc.id, key: keyPrefixOf(apiKey), mode, status: 502, ms: Date.now() - reqStarted, acct: usedAcct ? usedAcct.slice(0, 8) : null });
-  return jsonResponse({ error: { message: lastErrMsg, type: "api_error" } }, 502);
+  // Upstream durumunu koru (429/403/503 vs.) ve Anthropic/OpenAI enum tipini eşle;
+  // 429'da Retry-After'ı upstream metninden çıkar (retryAfterMs / "try again in").
+  const typeMap = { 400: "invalid_request_error", 401: "authentication_error", 403: "permission_error", 404: "not_found_error", 429: "rate_limit_error", 503: "overloaded_error" };
+  const errType = typeMap[lastStatus] || "api_error";
+  const retryAfter = lastStatus === 429 ? (lastRetryAfter !== null && lastRetryAfter !== undefined ? Math.max(1, parseInt(lastRetryAfter, 10) || 1) : Math.max(1, Math.round(parseCooldown(lastErrMsg, 429) / 1000))) : null;
+  logRequest({ t: new Date().toISOString(), model: mc.id, key: keyPrefixOf(apiKey), mode, status: lastStatus, ms: Date.now() - reqStarted, acct: usedAcct ? usedAcct.slice(0, 8) : null });
+  return jsonResponse({ error: { message: lastErrMsg, type: errType, retry_after: retryAfter } }, lastStatus, retryAfter ? { "Retry-After": String(retryAfter) } : {});
 }
 
 
