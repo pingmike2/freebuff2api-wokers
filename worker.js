@@ -21,9 +21,586 @@ const MODELS = [
   { id: "meta/muse-spark-1.2-contributor", session: "meta/muse-spark-1.2-contributor", agent: "base2-free-muse-spark", upstream: "meta/muse-spark-1.2-contributor" },
 ];
 
+let probeTtlMs = 10 * 60 * 1000; // probe cache TTL; FREEBUFF_PROBE_TTL_MIN overrides (default 10 min)
+
+// --- i18n ------------------------------------------------------------------
+// UI strings by language. tr is the source of truth; en/de/zh are maintained
+// as translations. `T(key, lang, ...args)` substitutes {1}, {2} positional args.
+const I18N = {
+  "tr": {
+    "disconnect": "Bağlantıyı kes",
+    "home": "Ana sayfa",
+    "refresh": "Yenile",
+    "lang": "Dil",
+    "apiKey": "API anahtarı",
+    "keyPh": "FREEBUFF_API_KEY (usage / accounts için gerekli)",
+    "connect": "Bağlan",
+    "enterKeyFirst": "Önce API anahtarını gir",
+    "loading": "Yükleniyor...",
+    "updated": "{1} güncellendi",
+    "authFailed": "Kimlik doğrulama başarısız: {1} - anahtarın FREEBUFF_API_KEY ile eşleştiğini kontrol et.",
+    "disconnected": "Bağlantı kesildi",
+    "tabOverview": "Genel bakış",
+    "tabAccounts": "Hesaplar",
+    "tabModels": "Modeller",
+    "tabSystem": "Sistem",
+    "health": "Sağlık",
+    "perDay": "günlük",
+    "hourlyHeatmap": "Saatlik ısı haritası",
+    "heatmapSub": "son 7 gün, UTC",
+    "apiKeys": "API anahtarları",
+    "todayPlus14d": "bugün + 14 gün",
+    "addKey": "Anahtar ekle",
+    "kvPersisted": "KV'de saklanır",
+    "newKeyPh": "yeni api anahtarı",
+    "limitPh": "günlük limit (0 = sınırsız)",
+    "add": "Ekle",
+    "perModel": "Model başına",
+    "downloadCsv": "CSV indir",
+    "requestLog": "İstek günlüğü",
+    "last50": "son 50, bu izole",
+    "kvNote": "Sayaçlar KV'de yeniden başlatmalarda korunur. Hesap kotaları Freebuff'tan gelir.",
+    "dailyReset": "Günlük sıfırlanma",
+    "resetIn": "Sıfırlanmaya {1} kaldı",
+    "resetsAt": "{1} UTC'de sıfırlanır",
+    "resetAt": "sıfırlanma {1}",
+    "quotaMatrix": "Kota matrisi",
+    "usedPerLimit": "kullanılan / limit, hesap x model",
+    "reprobe": "Yeniden probe",
+    "enterKeyConnect": "API anahtarını gir ve Bağlan'a bas.",
+    "accountErrors": "Hesap hataları",
+    "last5": "hesap başına son 5",
+    "accountDetail": "Hesap detayı",
+    "modelCatalog": "Model kataloğu",
+    "toggleModels": "aç/kapat (KV'de saklanır)",
+    "modelsLoadFailed": "Modeller yüklenemedi: {1}",
+    "alerts": "Uyarılar",
+    "sendTestAlert": "Test uyarısı gönder",
+    "maintMode": "Bakım modu",
+    "on": "açık",
+    "off": "kapalı",
+    "enable": "Etkinleştir",
+    "disable": "Devre dışı bırak",
+    "sessionsCooldowns": "Oturumlar ve bekleme süreleri",
+    "currentIsolate": "bu izole",
+    "openSystemTab": "Açmak için Sistem sekmesini aç.",
+    "appearance": "Görünüm",
+    "accent": "Vurgu rengi:",
+    "storage": "Depolama",
+    "storageFromStatus": "/admin/status'tan (açılışta).",
+    "flushOk": "| flush başarılı",
+    "flushNone": "| flush yok",
+    "warnNoKey": "Uyarı: sunucuda FREEBUFF_API_KEY tanımlı değil; yalnızca varsayılan anahtar \"freebuff-default-key\" kabul edilir. Kendi anahtarların için FREEBUFF_API_KEY (veya FREEBUFF_API_KEYS) ayarla.",
+    "warnDefaultKey": "Sunucu varsayılan anahtarı kullanıyor: \"freebuff-default-key\" (özel anahtar ayarlanmamış).",
+    "requests": "İstekler",
+    "successRate": "Başarı oranı",
+    "errorRate": "Hata oranı",
+    "inputChars": "Giriş karakteri",
+    "outputChars": "Çıkış karakteri",
+    "uptime": "Çalışma süresi",
+    "vsPrevDay": "dünküne göre",
+    "p50": "p50 gecikme",
+    "p95": "p95 gecikme",
+    "allModels": "tüm modeller",
+    "noDailyData": "Henüz günlük veri yok.",
+    "ok": "başarı",
+    "err": "hata",
+    "avg7d": "7g ort.",
+    "trendTip": "7 günlük hareketli ortalama",
+    "noHourlyData": "Henüz saatlik veri yok.",
+    "date": "Tarih",
+    "noKeys": "Anahtar yapılandırılmamış.",
+    "dailyLimitN": "günlük limit {1}",
+    "unlimited": "sınırsız",
+    "del": "Sil",
+    "dis": "Kapat",
+    "en": "Aç",
+    "keyAdded": "Anahtar eklendi",
+    "keyRemoved": "Anahtar silindi",
+    "keyEnabled": "Anahtar etkinleştirildi",
+    "keyDisabled": "Anahtar devre dışı bırakıldı",
+    "enterKey": "Önce bir anahtar gir",
+    "promptRemove": "Silinecek tam anahtar (ilk 8: {1})",
+    "promptDisable": "Devre dışı bırakılacak tam anahtar (ilk 8: {1})",
+    "promptEnable": "Etkinleştirilecek tam anahtar (ilk 8: {1})",
+    "account": "Hesap",
+    "status": "Durum",
+    "lastUsed": "Son kullanım",
+    "error": "Hata",
+    "alive": "çalışıyor",
+    "invalid": "geçersiz",
+    "unknown": "bilinmiyor",
+    "probedAt": "{1}Z'de probe edildi",
+    "noErrors": "Kayıtlı hata yok.",
+    "time": "Zaman",
+    "message": "Mesaj",
+    "noRequests": "Henüz istek kaydı yok.",
+    "latency": "Gecikme",
+    "apiModelId": "API model kimliği",
+    "upstreamAgent": "Üst akış ajanı",
+    "state": "Durum",
+    "disabled": "devre dışı",
+    "enabled": "etkin",
+    "modelDisabled": "Model {1} devre dışı bırakıldı",
+    "modelEnabled": "Model {1} etkinleştirildi",
+    "noModelUsage": "Henüz model kullanımı yok.",
+    "noAccounts": "Hesap yok.",
+    "dead": "ölü",
+    "exp": "{1}'de süresi doluyor",
+    "sent": "gönderildi",
+    "failed": "başarısız: {1}",
+    "error_": "hata: {1}",
+    "maintOn": "Bakım açık",
+    "maintOff": "Bakım kapalı",
+    "loadDataFirst": "Önce verileri yükle",
+    "model": "Model",
+    "traffic": "Trafik",
+    "probing": "Probe yapılıyor...",
+    "key": "Anahtar",
+    "limit": "Limit",
+    "reset": "Sıfırlama",
+    "req": "İstek",
+    "cooldown": "Bekleme",
+    "lastAlert": "Son uyarı",
+    "sessions": "Oturumlar",
+    "lastError": "Son hata"
+  },
+  "en": {
+    "disconnect": "Disconnect",
+    "home": "Home",
+    "refresh": "Refresh",
+    "lang": "Language",
+    "apiKey": "API key",
+    "keyPh": "FREEBUFF_API_KEY (required for usage / accounts)",
+    "connect": "Connect",
+    "enterKeyFirst": "Enter API key first",
+    "loading": "Loading...",
+    "updated": "Updated: {1}",
+    "authFailed": "Authentication failed: {1} - verify your key matches FREEBUFF_API_KEY.",
+    "disconnected": "Disconnected",
+    "tabOverview": "Overview",
+    "tabAccounts": "Accounts",
+    "tabModels": "Models",
+    "tabSystem": "System",
+    "health": "Health",
+    "perDay": "per day",
+    "hourlyHeatmap": "Hourly heatmap",
+    "heatmapSub": "last 7 days, UTC",
+    "apiKeys": "API keys",
+    "todayPlus14d": "today + 14 days",
+    "addKey": "Add key",
+    "kvPersisted": "stored in KV",
+    "newKeyPh": "new api key",
+    "limitPh": "daily limit (0 = unlimited)",
+    "add": "Add",
+    "perModel": "per model",
+    "downloadCsv": "Download CSV",
+    "requestLog": "Request log",
+    "last50": "last 50, this isolate",
+    "kvNote": "Counters persist in KV across restarts. Account quotas come from Freebuff.",
+    "dailyReset": "Daily reset",
+    "resetIn": "Resets in {1}",
+    "resetsAt": "Resets at {1} UTC",
+    "resetAt": "reset {1}",
+    "quotaMatrix": "Quota matrix",
+    "usedPerLimit": "used / limit, account x model",
+    "reprobe": "Re-probe",
+    "enterKeyConnect": "Enter your API key and press Connect.",
+    "accountErrors": "Account errors",
+    "last5": "last 5 per account",
+    "accountDetail": "Account detail",
+    "modelCatalog": "Model catalog",
+    "toggleModels": "toggle (stored in KV)",
+    "modelsLoadFailed": "Failed to load models: {1}",
+    "alerts": "Alerts",
+    "sendTestAlert": "Send test alert",
+    "maintMode": "Maintenance mode",
+    "on": "on",
+    "off": "off",
+    "enable": "Enable",
+    "disable": "Disable",
+    "sessionsCooldowns": "Sessions and cooldowns",
+    "currentIsolate": "this isolate",
+    "openSystemTab": "Open the System tab to view.",
+    "appearance": "Appearance",
+    "accent": "Accent color:",
+    "storage": "Storage",
+    "storageFromStatus": "from /admin/status (on load).",
+    "flushOk": "| flush OK",
+    "flushNone": "| no flush",
+    "warnNoKey": "Warning: FREEBUFF_API_KEY is not set on the server; only the default key \"freebuff-default-key\" is accepted. Set FREEBUFF_API_KEY (or FREEBUFF_API_KEYS) for your own keys.",
+    "warnDefaultKey": "Server is using the default key: \"freebuff-default-key\" (no custom key set).",
+    "requests": "Requests",
+    "successRate": "Success rate",
+    "errorRate": "Error rate",
+    "inputChars": "Input chars",
+    "outputChars": "Output chars",
+    "uptime": "Uptime",
+    "vsPrevDay": "vs yesterday",
+    "p50": "p50 latency",
+    "p95": "p95 latency",
+    "allModels": "all models",
+    "noDailyData": "No daily data yet.",
+    "ok": "ok",
+    "err": "err",
+    "avg7d": "7d avg",
+    "trendTip": "7-day moving average",
+    "noHourlyData": "No hourly data yet.",
+    "date": "Date",
+    "noKeys": "No keys configured.",
+    "dailyLimitN": "daily limit {1}",
+    "unlimited": "unlimited",
+    "del": "Delete",
+    "dis": "Disable",
+    "en": "Enable",
+    "keyAdded": "Key added",
+    "keyRemoved": "Key removed",
+    "keyEnabled": "Key enabled",
+    "keyDisabled": "Key disabled",
+    "enterKey": "Enter a key first",
+    "promptRemove": "Full key to delete (first 8: {1})",
+    "promptDisable": "Full key to disable (first 8: {1})",
+    "promptEnable": "Full key to enable (first 8: {1})",
+    "account": "Account",
+    "status": "Status",
+    "lastUsed": "Last used",
+    "error": "Error",
+    "alive": "alive",
+    "invalid": "invalid",
+    "unknown": "unknown",
+    "probedAt": "probed at {1}Z",
+    "noErrors": "No recorded errors.",
+    "time": "Time",
+    "message": "Message",
+    "noRequests": "No requests logged yet.",
+    "latency": "Latency",
+    "apiModelId": "API model ID",
+    "upstreamAgent": "Upstream agent",
+    "state": "State",
+    "disabled": "disabled",
+    "enabled": "enabled",
+    "modelDisabled": "Model {1} disabled",
+    "modelEnabled": "Model {1} enabled",
+    "noModelUsage": "No model usage yet.",
+    "noAccounts": "No accounts.",
+    "dead": "dead",
+    "exp": "expires at {1}",
+    "sent": "sent",
+    "failed": "failed: {1}",
+    "error_": "error: {1}",
+    "maintOn": "Maintenance on",
+    "maintOff": "Maintenance off",
+    "loadDataFirst": "Load data first",
+    "model": "Model",
+    "traffic": "Traffic",
+    "probing": "Probing...",
+    "key": "Key",
+    "limit": "Limit",
+    "reset": "Reset",
+    "req": "Req",
+    "cooldown": "Cooldown",
+    "lastAlert": "Last alert",
+    "sessions": "Sessions",
+    "lastError": "Last error"
+  },
+  "de": {
+    "disconnect": "Trennen",
+    "home": "Start",
+    "refresh": "Aktualisieren",
+    "lang": "Sprache",
+    "apiKey": "API-Schlüssel",
+    "keyPh": "FREEBUFF_API_KEY (für usage / accounts erforderlich)",
+    "connect": "Verbinden",
+    "enterKeyFirst": "Zuerst API-Schlüssel eingeben",
+    "loading": "Wird geladen...",
+    "updated": "Aktualisiert: {1}",
+    "authFailed": "Authentifizierung fehlgeschlagen: {1} - prüfe, ob dein Schlüssel mit FREEBUFF_API_KEY übereinstimmt.",
+    "disconnected": "Verbindung getrennt",
+    "tabOverview": "Übersicht",
+    "tabAccounts": "Konten",
+    "tabModels": "Modelle",
+    "tabSystem": "System",
+    "health": "Health",
+    "perDay": "pro Tag",
+    "hourlyHeatmap": "Stündliche Heatmap",
+    "heatmapSub": "letzte 7 Tage, UTC",
+    "apiKeys": "API-Schlüssel",
+    "todayPlus14d": "heute + 14 Tage",
+    "addKey": "Schlüssel hinzufügen",
+    "kvPersisted": "wird in KV gespeichert",
+    "newKeyPh": "neuer API-Schlüssel",
+    "limitPh": "Tageslimit (0 = unbegrenzt)",
+    "add": "Hinzufügen",
+    "perModel": "pro Modell",
+    "downloadCsv": "CSV herunterladen",
+    "requestLog": "Anfrageprotokoll",
+    "last50": "letzte 50, dieses Isolate",
+    "kvNote": "Zähler bleiben in KV über Neustarts hinweg erhalten. Kontingente kommen von Freebuff.",
+    "dailyReset": "Täglicher Reset",
+    "resetIn": "Reset in {1}",
+    "resetsAt": "Reset um {1} UTC",
+    "resetAt": "Reset {1}",
+    "quotaMatrix": "Kontingent-Matrix",
+    "usedPerLimit": "verwendet / Limit, Konto x Modell",
+    "reprobe": "Erneut prüfen",
+    "enterKeyConnect": "API-Schlüssel eingeben und Verbinden drücken.",
+    "accountErrors": "Kontofehler",
+    "last5": "letzte 5 pro Konto",
+    "accountDetail": "Kontodetails",
+    "modelCatalog": "Modellkatalog",
+    "toggleModels": "ein/aus (in KV gespeichert)",
+    "modelsLoadFailed": "Modelle konnten nicht geladen werden: {1}",
+    "alerts": "Warnungen",
+    "sendTestAlert": "Testwarnung senden",
+    "maintMode": "Wartungsmodus",
+    "on": "an",
+    "off": "aus",
+    "enable": "Aktivieren",
+    "disable": "Deaktivieren",
+    "sessionsCooldowns": "Sitzungen und Abklingzeiten",
+    "currentIsolate": "dieses Isolate",
+    "openSystemTab": "Öffne den System-Tab.",
+    "appearance": "Darstellung",
+    "accent": "Akzentfarbe:",
+    "storage": "Speicher",
+    "storageFromStatus": "von /admin/status (beim Laden).",
+    "flushOk": "| Flush OK",
+    "flushNone": "| kein Flush",
+    "warnNoKey": "Warnung: FREEBUFF_API_KEY ist auf dem Server nicht gesetzt; nur der Standardschlüssel \"freebuff-default-key\" wird akzeptiert. Setze FREEBUFF_API_KEY (oder FREEBUFF_API_KEYS) für eigene Schlüssel.",
+    "warnDefaultKey": "Server verwendet den Standardschlüssel: \"freebuff-default-key\" (kein eigener Schlüssel gesetzt).",
+    "requests": "Anfragen",
+    "successRate": "Erfolgsrate",
+    "errorRate": "Fehlerrate",
+    "inputChars": "Eingabezeichen",
+    "outputChars": "Ausgabezeichen",
+    "uptime": "Betriebszeit",
+    "vsPrevDay": "ggü. gestern",
+    "p50": "p50 Latenz",
+    "p95": "p95 Latenz",
+    "allModels": "alle Modelle",
+    "noDailyData": "Noch keine Tagesdaten.",
+    "ok": "ok",
+    "err": "Fehler",
+    "avg7d": "7-Tage-Schnitt",
+    "trendTip": "7-Tage gleitender Durchschnitt",
+    "noHourlyData": "Noch keine Stundendaten.",
+    "date": "Datum",
+    "noKeys": "Keine Schlüssel konfiguriert.",
+    "dailyLimitN": "Tageslimit {1}",
+    "unlimited": "unbegrenzt",
+    "del": "Löschen",
+    "dis": "Deaktivieren",
+    "en": "Aktivieren",
+    "keyAdded": "Schlüssel hinzugefügt",
+    "keyRemoved": "Schlüssel entfernt",
+    "keyEnabled": "Schlüssel aktiviert",
+    "keyDisabled": "Schlüssel deaktiviert",
+    "enterKey": "Zuerst einen Schlüssel eingeben",
+    "promptRemove": "Vollständiger Schlüssel zum Löschen (erste 8: {1})",
+    "promptDisable": "Vollständiger Schlüssel zum Deaktivieren (erste 8: {1})",
+    "promptEnable": "Vollständiger Schlüssel zum Aktivieren (erste 8: {1})",
+    "account": "Konto",
+    "status": "Status",
+    "lastUsed": "Zuletzt verwendet",
+    "error": "Fehler",
+    "alive": "aktiv",
+    "invalid": "ungültig",
+    "unknown": "unbekannt",
+    "probedAt": "geprüft um {1}Z",
+    "noErrors": "Keine aufgezeichneten Fehler.",
+    "time": "Zeit",
+    "message": "Nachricht",
+    "noRequests": "Noch keine Anfragen protokolliert.",
+    "latency": "Latenz",
+    "apiModelId": "API-Modell-ID",
+    "upstreamAgent": "Upstream-Agent",
+    "state": "Zustand",
+    "disabled": "deaktiviert",
+    "enabled": "aktiviert",
+    "modelDisabled": "Modell {1} deaktiviert",
+    "modelEnabled": "Modell {1} aktiviert",
+    "noModelUsage": "Noch keine Modellnutzung.",
+    "noAccounts": "Keine Konten.",
+    "dead": "tot",
+    "exp": "läuft um {1} ab",
+    "sent": "gesendet",
+    "failed": "fehlgeschlagen: {1}",
+    "error_": "Fehler: {1}",
+    "maintOn": "Wartung an",
+    "maintOff": "Wartung aus",
+    "loadDataFirst": "Zuerst Daten laden",
+    "model": "Modell",
+    "traffic": "Verkehr",
+    "probing": "Prüfung läuft...",
+    "key": "Schlüssel",
+    "limit": "Limit",
+    "reset": "Reset",
+    "req": "Anfr.",
+    "cooldown": "Abklingzeit",
+    "lastAlert": "Letzte Warnung",
+    "sessions": "Sitzungen",
+    "lastError": "Letzter Fehler"
+  },
+  "zh": {
+    "disconnect": "断开连接",
+    "home": "首页",
+    "refresh": "刷新",
+    "lang": "语言",
+    "apiKey": "API 密钥",
+    "keyPh": "FREEBUFF_API_KEY（usage / accounts 需要）",
+    "connect": "连接",
+    "enterKeyFirst": "请先输入 API 密钥",
+    "loading": "加载中...",
+    "updated": "已更新：{1}",
+    "authFailed": "身份验证失败：{1} - 请确认你的密钥与 FREEBUFF_API_KEY 匹配。",
+    "disconnected": "已断开连接",
+    "tabOverview": "概览",
+    "tabAccounts": "账户",
+    "tabModels": "模型",
+    "tabSystem": "系统",
+    "health": "健康",
+    "perDay": "每日",
+    "hourlyHeatmap": "每小时热力图",
+    "heatmapSub": "最近 7 天，UTC",
+    "apiKeys": "API 密钥",
+    "todayPlus14d": "今天 + 14 天",
+    "addKey": "添加密钥",
+    "kvPersisted": "存储于 KV",
+    "newKeyPh": "新的 API 密钥",
+    "limitPh": "每日限额（0 = 无限制）",
+    "add": "添加",
+    "perModel": "每个模型",
+    "downloadCsv": "下载 CSV",
+    "requestLog": "请求日志",
+    "last50": "最近 50 条，当前 isolate",
+    "kvNote": "计数器存储于 KV，重启后保留。账户配额来自 Freebuff。",
+    "dailyReset": "每日重置",
+    "resetIn": "{1} 后重置",
+    "resetsAt": "在 {1} UTC 重置",
+    "resetAt": "重置时间 {1}",
+    "quotaMatrix": "配额矩阵",
+    "usedPerLimit": "已用 / 限额，账户 x 模型",
+    "reprobe": "重新探测",
+    "enterKeyConnect": "输入 API 密钥并点击连接。",
+    "accountErrors": "账户错误",
+    "last5": "每个账户最近 5 条",
+    "accountDetail": "账户详情",
+    "modelCatalog": "模型目录",
+    "toggleModels": "开关（存储于 KV）",
+    "modelsLoadFailed": "模型加载失败：{1}",
+    "alerts": "警报",
+    "sendTestAlert": "发送测试警报",
+    "maintMode": "维护模式",
+    "on": "开启",
+    "off": "关闭",
+    "enable": "启用",
+    "disable": "禁用",
+    "sessionsCooldowns": "会话与冷却时间",
+    "currentIsolate": "当前 isolate",
+    "openSystemTab": "请打开系统选项卡。",
+    "appearance": "外观",
+    "accent": "强调色：",
+    "storage": "存储",
+    "storageFromStatus": "来自 /admin/status（加载时）。",
+    "flushOk": "| 刷新成功",
+    "flushNone": "| 无刷新",
+    "warnNoKey": "警告：服务器未设置 FREEBUFF_API_KEY；仅接受默认密钥 \"freebuff-default-key\"。请为你的密钥设置 FREEBUFF_API_KEY（或 FREEBUFF_API_KEYS）。",
+    "warnDefaultKey": "服务器正在使用默认密钥：\"freebuff-default-key\"（未设置自定义密钥）。",
+    "requests": "请求数",
+    "successRate": "成功率",
+    "errorRate": "错误率",
+    "inputChars": "输入字符",
+    "outputChars": "输出字符",
+    "uptime": "运行时间",
+    "vsPrevDay": "较昨日",
+    "p50": "p50 延迟",
+    "p95": "p95 延迟",
+    "allModels": "所有模型",
+    "noDailyData": "暂无每日数据。",
+    "ok": "成功",
+    "err": "错误",
+    "avg7d": "7 天均值",
+    "trendTip": "7 天移动平均",
+    "noHourlyData": "暂无每小时数据。",
+    "date": "日期",
+    "noKeys": "未配置密钥。",
+    "dailyLimitN": "每日限额 {1}",
+    "unlimited": "无限制",
+    "del": "删除",
+    "dis": "禁用",
+    "en": "启用",
+    "keyAdded": "密钥已添加",
+    "keyRemoved": "密钥已删除",
+    "keyEnabled": "密钥已启用",
+    "keyDisabled": "密钥已禁用",
+    "enterKey": "请先输入密钥",
+    "promptRemove": "要删除的完整密钥（前 8 位：{1}）",
+    "promptDisable": "要禁用的完整密钥（前 8 位：{1}）",
+    "promptEnable": "要启用的完整密钥（前 8 位：{1}）",
+    "account": "账户",
+    "status": "状态",
+    "lastUsed": "最后使用",
+    "error": "错误",
+    "alive": "存活",
+    "invalid": "无效",
+    "unknown": "未知",
+    "probedAt": "于 {1}Z 探测",
+    "noErrors": "无记录错误。",
+    "time": "时间",
+    "message": "消息",
+    "noRequests": "暂无请求记录。",
+    "latency": "延迟",
+    "apiModelId": "API 模型 ID",
+    "upstreamAgent": "上游代理",
+    "state": "状态",
+    "disabled": "已禁用",
+    "enabled": "已启用",
+    "modelDisabled": "模型 {1} 已禁用",
+    "modelEnabled": "模型 {1} 已启用",
+    "noModelUsage": "暂无模型用量。",
+    "noAccounts": "暂无账户。",
+    "dead": "失效",
+    "exp": "于 {1} 过期",
+    "sent": "已发送",
+    "failed": "失败：{1}",
+    "error_": "错误：{1}",
+    "maintOn": "维护已开启",
+    "maintOff": "维护已关闭",
+    "loadDataFirst": "请先加载数据",
+    "model": "模型",
+    "traffic": "流量",
+    "probing": "探测中...",
+    "key": "密钥",
+    "limit": "限额",
+    "reset": "重置",
+    "req": "请求",
+    "cooldown": "冷却",
+    "lastAlert": "最近警报",
+    "sessions": "会话",
+    "lastError": "最近错误"
+  }
+};
+function T(k, lang) {
+  const d = I18N[lang] || I18N.tr;
+  let s = (d && d[k]) || I18N.tr[k] || k;
+  for (let i = 2; i < arguments.length; i++) s = s.split("{" + (i - 1) + "}").join(arguments[i]);
+  return s;
+}
+function langOf(request) {
+  const c = request.headers.get("cookie") || "";
+  const m = c.match(/(?:^|;\s*)f2a-lang=([a-z]{2})/i);
+  if (m && I18N[m[1].toLowerCase()]) return m[1].toLowerCase();
+  return "tr";
+}
+// ---------------------------------------------------------------------------
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (env.FREEBUFF_PROBE_TTL_MIN) {
+      const m = Math.round(Number(env.FREEBUFF_PROBE_TTL_MIN));
+      if (isFinite(m) && m >= 1) probeTtlMs = m * 60 * 1000;
+    }
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders() });
 
     // healthz is public so monitoring does not need an API key.
@@ -51,7 +628,7 @@ export default {
     // The HTML panel is public. Its data requests authenticate with the key
     // entered by the user, so the key is not embedded in HTML or the URL.
     if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
-      return adminPageResponse();
+      return adminPageResponse(request);
     }
 
     // Landing page and console metadata are public; they contain no secrets.
@@ -143,7 +720,6 @@ function parseAccounts(env) {
 // ---------------------------------------------------------------------------
 
 const acctHealth = new Map(); // token -> { alive, uid, checkedAt }
-const PROBE_TTL_MS = 10 * 60 * 1000; //  10 ，
 
 /**
  * ：GET /api/v1/me（0 ， session）
@@ -156,7 +732,7 @@ const PROBE_TTL_MS = 10 * 60 * 1000; //  10 ，
  */
 async function probeAccount(token) {
   const cached = acctHealth.get(token);
-  if (cached && Date.now() - cached.checkedAt < PROBE_TTL_MS) return cached;
+  if (cached && Date.now() - cached.checkedAt < probeTtlMs) return cached;
   const hist = cached
     ? { lastErrors: cached.lastErrors || [], lastUsedAt: cached.lastUsedAt || null, requests: cached.requests || 0 }
     : { lastErrors: [], lastUsedAt: null, requests: 0 };
@@ -378,6 +954,9 @@ section{background:var(--panel);border:1px solid var(--border);border-radius:var
 #authCard.collapsed{display:none}
 h1{font-size:18px;margin:0 0 4px;font-weight:700}
 h2{font-size:15px;margin:0 0 12px;font-weight:600}
+.panel>h2{padding-bottom:8px;border-bottom:1px solid var(--border);margin:32px 0 14px}
+.panel>h2:first-child{margin-top:0}
+.panel>h2 select,.panel>h2 button{vertical-align:middle}
 h2::before{content:'# ';color:var(--accent)}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px}
@@ -489,91 +1068,95 @@ function landingPage() {
   return new Response(pageShell("freebuff2api console", landingBody()), { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders() } });
 }
 
-function adminBody() {
+function adminBody(lang) {
   return `
 <header>
   <div class="brand"><span class="dot" id="dot"></span><span class="prompt">$</span>freebuff2api<span class="cursor"></span><span class="tag" id="version">console</span></div>
   <div class="tag" id="backend">store: ...</div>
   <div class="tag accent" id="alertCfg" style="display:none"></div>
-  <div class="row" style="margin-left:auto"><button class="ghost small" id="disconnect" onclick="disconnect()" style="display:none">Disconnect</button><a class="btn" href="/">Home</a><button class="ghost small" onclick="loadAll(true)">Refresh</button></div>
+  <div class="row" style="margin-left:auto"><select id="langSel" onchange="setLang(this.value)" title="${T('lang', lang)}" style="width:auto;margin-right:8px"><option value="tr"${lang==='tr'?' selected':''}>Türkçe</option><option value="en"${lang==='en'?' selected':''}>English</option><option value="de"${lang==='de'?' selected':''}>Deutsch</option><option value="zh"${lang==='zh'?' selected':''}>中文</option></select><button class="ghost small" id="disconnect" onclick="disconnect()" style="display:none">${T('disconnect', lang)}</button><a class="btn" href="/">${T('home', lang)}</a><button class="ghost small" onclick="loadAll(true)">${T('refresh', lang)}</button></div>
 </header>
 <main>
 <section id="authCard">
-  <h2>API key</h2>
+  <h2>${T('apiKey', lang)}</h2>
   <div class="row">
-    <input id="key" type="password" autocomplete="off" placeholder="FREEBUFF_API_KEY (required for usage / accounts)" onkeydown="if(event.key==='Enter')loadAll(true)">
-    <button onclick="loadAll(true)">Connect</button>
+    <input id="key" type="password" autocomplete="off" placeholder="${T('keyPh', lang)}" onkeydown="if(event.key==='Enter')loadAll(true)">
+    <button onclick="loadAll(true)">${T('connect', lang)}</button>
   </div>
   <div class="banner warn" id="authHint" style="display:none"></div>
   <div id="status" class="muted" style="margin-top:8px"></div>
 </section>
 <div class="tabs">
-  <button id="tab-overview" class="active" onclick="switchTab('overview')">Overview</button>
-  <button id="tab-accounts" onclick="switchTab('accounts')">Accounts</button>
-  <button id="tab-models" onclick="switchTab('models')">Models</button>
-  <button id="tab-system" onclick="switchTab('system')">System</button>
+  <button id="tab-overview" class="active" onclick="switchTab('overview')">${T('tabOverview', lang)}</button>
+  <button id="tab-accounts" onclick="switchTab('accounts')">${T('tabAccounts', lang)}</button>
+  <button id="tab-models" onclick="switchTab('models')">${T('tabModels', lang)}</button>
+  <button id="tab-system" onclick="switchTab('system')">${T('tabSystem', lang)}</button>
 </div>
 <section id="panel-overview" class="panel active">
-  <h2>Health <span class="muted" id="usageTime"></span></h2>
+  <h2>${T('health', lang)} <span class="muted" id="usageTime"></span> <span id="resetCount" class="muted"></span></h2>
   <div id="usage" class="grid"></div>
-  <h2>Traffic <span class="muted">per day</span>
+  <h2>${T('traffic', lang)} <span class="muted">${T('perDay', lang)}</span>
     <select id="chartModel" onchange="chartSel()" style="width:auto;margin-left:8px"></select>
     <select id="chartRange" onchange="chartSel()" style="width:auto;margin-left:8px">
       <option value="7">7d</option><option value="14" selected>14d</option><option value="30">30d</option>
     </select>
   </h2>
   <div id="chart"></div>
-  <h2>Hourly heatmap <span class="muted">last 7 days, UTC</span></h2>
+  <h2>${T('hourlyHeatmap', lang)} <span class="muted">${T('heatmapSub', lang)}</span></h2>
   <div class="heat" id="heatmap"></div>
-  <h2>API keys <span class="muted">today + 14d</span></h2>
+  <h2>${T('apiKeys', lang)} <span class="muted">${T('todayPlus14d', lang)}</span></h2>
   <div id="keys"></div>
-  <h2>Add key <span class="muted">persisted in KV</span></h2>
+  <h2>${T('addKey', lang)} <span class="muted">${T('kvPersisted', lang)}</span></h2>
   <div class="row">
-    <input id="newKey" placeholder="new api key" style="flex:1;min-width:200px">
-    <input id="newKeyLimit" placeholder="daily limit (0 = unlimited)" style="width:180px">
-    <button class="ghost small" onclick="addKey()">Add</button>
+    <input id="newKey" placeholder="${T('newKeyPh', lang)}" style="flex:1;min-width:200px">
+    <input id="newKeyLimit" placeholder="${T('limitPh', lang)}" style="width:180px">
+    <button class="ghost small" onclick="addKey()">${T('add', lang)}</button>
   </div>
-  <h2>Per model <button class="ghost small" onclick="exportCsv()" style="margin-left:8px">Download CSV</button></h2>
+  <h2>${T('perModel', lang)} <button class="ghost small" onclick="exportCsv()" style="margin-left:8px">${T('downloadCsv', lang)}</button></h2>
   <div id="modelShare"></div>
   <div id="byModel"></div>
-  <h2>Request log <span class="muted">last 50, current isolate</span></h2>
+  <h2>${T('requestLog', lang)} <span class="muted">${T('last50', lang)}</span></h2>
   <div id="reqlog"></div>
-  <p class="muted">Counters persist in KV across restarts. Account quotas come from Freebuff.</p>
+  <p class="muted">${T('kvNote', lang)}</p>
 </section>
 <section id="panel-accounts" class="panel">
-  <h2>Quota matrix <span class="muted">used / limit per account x model</span> <button class="ghost small" id="probeBtn" onclick="loadAll(true)" style="margin-left:8px">Re-probe</button></h2>
-  <div class="qm" id="quotaMatrix"><p class="muted">Enter the API key and click Connect.</p></div>
-  <h2>Account errors <span class="muted">last 5 per account</span></h2>
+  <h2>${T('quotaMatrix', lang)} <span class="muted">${T('usedPerLimit', lang)}</span> <button class="ghost small" id="probeBtn" onclick="loadAll(true)" style="margin-left:8px">${T('reprobe', lang)}</button></h2>
+  <div class="qm" id="quotaMatrix"><p class="muted">${T('enterKeyConnect', lang)}</p></div>
+  <h2>${T('accountErrors', lang)} <span class="muted">${T('last5', lang)}</span></h2>
   <div id="acctErrors"></div>
-  <h2>Account detail</h2>
-  <div id="accounts" class="muted">Enter the API key and click Connect.</div>
+  <h2>${T('accountDetail', lang)}</h2>
+  <div id="accounts" class="muted">${T('enterKeyConnect', lang)}</div>
 </section>
 <section id="panel-models" class="panel">
-  <h2>Model catalog <span class="muted">toggle enabled/disabled (persisted in KV)</span></h2>
-  <div id="models">Loading...</div>
+  <h2>${T('modelCatalog', lang)} <span class="muted">${T('toggleModels', lang)}</span></h2>
+  <div id="models">${T('loading', lang)}</div>
 </section>
-<section id="panel-system" class="panel">  <h2>Alerts</h2>
-  <div id="alertStatus" class="muted">Loading...</div>
-  <div class="row" style="margin-top:8px"><button class="ghost small" onclick="testAlert()">Send test alert</button><span class="muted" id="alertResult"></span></div>
-  <h2>Maintenance mode</h2>
-  <div class="row"><span class="muted" id="maintState">off</span><button class="ghost small" id="maintBtn" onclick="toggleMaint()">Enable</button></div>
-  <h2>Sessions &amp; cooldowns <span class="muted">current isolate</span></h2>
-  <div id="stateTable"><p class="muted">Open System tab to load.</p></div>
-  <h2>Appearance</h2>
+<section id="panel-system" class="panel">  <h2>${T('alerts', lang)}</h2>
+  <div id="alertStatus" class="muted">${T('loading', lang)}</div>
+  <div class="row" style="margin-top:8px"><button class="ghost small" onclick="testAlert()">${T('sendTestAlert', lang)}</button><span class="muted" id="alertResult"></span></div>
+  <h2>${T('maintMode', lang)}</h2>
+  <div class="row"><span class="muted" id="maintState">${T('off', lang)}</span><button class="ghost small" id="maintBtn" onclick="toggleMaint()">${T('enable', lang)}</button></div>
+  <h2>${T('sessionsCooldowns', lang)} <span class="muted">${T('currentIsolate', lang)}</span></h2>
+  <div id="stateTable"><p class="muted">${T('openSystemTab', lang)}</p></div>
+  <h2>${T('appearance', lang)}</h2>
   <div class="row">
-    <span class="muted">Accent:</span>
+    <span class="muted">${T('accent', lang)}</span>
     <button class="ghost small" onclick="setAccent('#94e2d5')">teal</button>
     <button class="ghost small" onclick="setAccent('#89b4fa')">blue</button>
     <button class="ghost small" onclick="setAccent('#a6e3a1')">green</button>
   </div>
-  <h2>Storage</h2>
-  <div id="storageInfo" class="muted">From /admin/status (boot).</div>
+  <h2>${T('storage', lang)}</h2>
+  <div id="storageInfo" class="muted">${T('storageFromStatus', lang)}</div>
 </section>
 <div id="tip" class="tip" style="display:none"></div>
 </main>
 <script>
+var LANG=${JSON.stringify(lang)};var I18N=${JSON.stringify(I18N)};
+function t(k){var s=(I18N[LANG]&&I18N[LANG][k])||I18N.tr[k]||k;for(var i=1;i<arguments.length;i++)s=s.split('{'+i+'}').join(arguments[i]);return s}
+function setLang(v){document.cookie='f2a-lang='+v+'; path=/; max-age=31536000';localStorage.setItem('f2a-lang',v);location.reload()}
 var KEY='';
 var LAST_USAGE=null;
+var LAST_ACCTS=null;
 var LAST_DAYS=[];
 var LAST_BDM={};
 var MODEL_IDS=[];
@@ -589,46 +1172,48 @@ function switchTab(t){['overview','accounts','models','system'].forEach(function
 function fmtDur(sec){sec=sec||0;var h=Math.floor(sec/3600),m=Math.floor(sec%3600/60);return h>0?(h+'h '+m+'m'):(m+'m '+(sec%60)+'s')}
 function fmtPct(n){if(n==null||!isFinite(n))return '0%';return Math.round(n*100)+'%'}
 function statusDot(ok){$('dot').className='dot'+(ok?' ok':'')}
-function deltaChip(cur,prev){if(cur==null||prev==null||prev<=0)return '<span class="delta flat">-</span>';var d=(cur-prev)/prev;var cls=d>=0?'up':'down';var sign=d>=0?'+':'';return '<span class="delta '+cls+'">'+sign+Math.round(d*100)+'% vs prev day</span>'}
-async function boot(){try{var s=await (await fetch('/admin/status')).json();$('version').textContent='v'+s.version;var a=s.auth||{};if(a.api_key_set===false){statusDot(false);banner('Warning: no FREEBUFF_API_KEY is configured on the server, so it only accepts the default key "freebuff-default-key". Set FREEBUFF_API_KEY (or FREEBUFF_API_KEYS) for your own keys.')}else{statusDot(true);banner(a.mode==='default'?'Server uses the default key "freebuff-default-key" (no custom key set).':null)}$('backend').textContent='store: '+(s.store_backend||'?')+(s.last_flush_at?' | flush ok':' | flush none');var ac=$('alertCfg');if(s.alerts){var parts=[];if(s.alerts.webhook)parts.push('webhook');if(s.alerts.telegram)parts.push('telegram');if(parts.length){ac.style.display='';ac.textContent='alerts: '+parts.join('+')}else{ac.style.display='none'}}else{ac.style.display='none'}$('status').textContent=s.accounts+' account(s), '+s.models+' model(s), '+s.key_count+' key(s), up '+fmtDur(s.uptime_seconds);$('storageInfo').textContent='backend: '+(s.store_backend||'?')+' | last flush: '+(s.last_flush_at?s.last_flush_at.slice(11,19)+'Z':'never');var al=$('alertStatus');if(s.alerts){al.innerHTML='webhook: <b class="'+(s.alerts.webhook?'ok':'err')+'">'+(s.alerts.webhook?'on':'off')+'</b> | telegram: <b class="'+(s.alerts.telegram?'ok':'err')+'">'+(s.alerts.telegram?'on':'off')+'</b>'}setAccent(localStorage.getItem('f2a-accent')||'#94e2d5',true)}catch(e){statusDot(false);setStatus('Status probe failed: '+e.message,'err')}try{var saved=localStorage.getItem('f2a-key');if(saved){$('key').value=saved;loadAll(false)}}catch(e){}}
-async function loadAll(refresh){if(REFRESHING)return;REFRESHING=true;var k=$('key').value.trim();if(!k){setStatus('Enter the API key first','err');REFRESHING=false;return}KEY=k;localStorage.setItem('f2a-key',KEY);if(refresh){var pb=$('probeBtn');if(pb){pb.disabled=true;pb.textContent='Probing...'}}setStatus('Loading...');try{var u=await get('/admin/usage'),a=await get('/admin/accounts'+(refresh?'?refresh=1':'')),l=await get('/admin/log');LAST_USAGE=u;renderUsage(u);renderLatency(l);fillChartSelect(u.by_day_model||{});renderChart(u.days||[],u.by_day_model||{});renderKeys(u.keys||[]);renderHeatmap(u.hours||{});renderDonut(u.by_model||{});renderAccounts(a);renderAcctErrors(a);renderMatrix(a,MODEL_IDS);renderLog(l);$('authCard').classList.add('collapsed');$('disconnect').style.display='';setStatus('Updated '+new Date().toLocaleTimeString(),'ok')}catch(e){setStatus(e.message,'err');$('accounts').textContent='Could not load accounts.';banner('Auth failed: '+e.message+' - check that the key matches FREEBUFF_API_KEY.')}finally{REFRESHING=false;if(refresh){var pb2=$('probeBtn');if(pb2){pb2.disabled=false;pb2.textContent='Re-probe'}}}}
-function disconnect(){KEY='';localStorage.removeItem('f2a-key');$('authCard').classList.remove('collapsed');$('disconnect').style.display='none';setStatus('Disconnected','')}
-function renderUsage(u){var req=u.requests||0,ok=u.successes||0,err=u.errors||0;var sr=req?(ok/req):0,er=req?(err/req):0;var d=u.days||[];var prev=d.length>1?d[1].requests:null;var cur=d.length?d[0].requests:req;var cards=[['Requests',req,deltaChip(cur,prev)],['Success rate',fmtPct(sr),''],['Error rate',fmtPct(er),''],['Input chars',u.input_characters,''],['Output chars',u.output_characters,''],['Uptime',fmtDur(u.uptime_seconds),'']];$('usage').innerHTML=cards.map(function(x){return '<div class="card"><b>'+esc(x[1])+'</b><span>'+esc(x[0])+'</span>'+x[2]+'</div>'}).join('');var rows=Object.keys(u.by_model||{}).map(function(m){var v=u.by_model[m];return '<tr><td><code>'+esc(m)+'</code></td><td class="num">'+v.requests+'</td><td class="num">'+v.successes+'</td><td class="num">'+v.errors+'</td></tr>'}).join('');$('byModel').innerHTML=rows?'<table><thead><tr><th>Model</th><th class="num">Requests</th><th class="num">OK</th><th class="num">Errors</th></tr></thead><tbody>'+rows+'</tbody></table>':'<p class="muted">No requests yet.</p>';$('usageTime').textContent='('+u.version+')'}
-function renderLatency(l){if(!l||!l.entries||!l.entries.length)return;var ms=[];l.entries.forEach(function(e){if(e.ms!=null)ms.push(e.ms)});if(!ms.length)return;ms.sort(function(a,b){return a-b});var p=function(p){var i=Math.min(ms.length-1,Math.floor(p*ms.length));return ms[i]};var lat='<div class="card"><b>'+p(0.5)+'ms</b><span>p50 latency</span></div><div class="card"><b>'+p(0.95)+'ms</b><span>p95 latency</span></div>';$('usage').innerHTML+=lat}
-function fillChartSelect(bdm){var ids=MODEL_IDS.length?MODEL_IDS:Object.keys(bdm||{});var cur=$('chartModel').value;var opts=['<option value="all">all models</option>'].concat(ids.map(function(id){return '<option value="'+esc(id)+'">'+esc(id)+'</option>'}));$('chartModel').innerHTML=opts.join('');$('chartModel').value=(cur&&ids.indexOf(cur)>=0)?cur:'all'}
+function deltaChip(cur,prev){if(cur==null||prev==null||prev<=0)return '<span class="delta flat">-</span>';var d=(cur-prev)/prev;var cls=d>=0?'up':'down';var sign=d>=0?'+':'';return '<span class="delta '+cls+'">'+sign+Math.round(d*100)+'% '+t('vsPrevDay')+'</span>'}
+async function boot(){try{var s=await (await fetch('/admin/status')).json();$('version').textContent='v'+s.version;var a=s.auth||{};if(a.api_key_set===false){statusDot(false);banner(t('warnNoKey'))}else{statusDot(true);banner(a.mode==='default'?t('warnDefaultKey'):null)}$('backend').textContent='store: '+(s.store_backend||'?')+(s.last_flush_at?t('flushOk'):t('flushNone'));var ac=$('alertCfg');if(s.alerts){var parts=[];if(s.alerts.webhook)parts.push('webhook');if(s.alerts.telegram)parts.push('telegram');if(parts.length){ac.style.display='';ac.textContent='alerts: '+parts.join('+')}else{ac.style.display='none'}}else{ac.style.display='none'}$('status').textContent=s.accounts+' account(s), '+s.models+' model(s), '+s.key_count+' key(s), up '+fmtDur(s.uptime_seconds);$('storageInfo').textContent='backend: '+(s.store_backend||'?')+' | last flush: '+(s.last_flush_at?s.last_flush_at.slice(11,19)+'Z':'never');var al=$('alertStatus');if(s.alerts){al.innerHTML='webhook: <b class="'+(s.alerts.webhook?'ok':'err')+'">'+(s.alerts.webhook?'on':'off')+'</b> | telegram: <b class="'+(s.alerts.telegram?'ok':'err')+'">'+(s.alerts.telegram?'on':'off')+'</b>'}setAccent(localStorage.getItem('f2a-accent')||'#94e2d5',true)}catch(e){statusDot(false);setStatus('Status probe failed: '+e.message,'err')}try{var saved=localStorage.getItem('f2a-key');if(saved){$('key').value=saved;loadAll(false)}}catch(e){}}
+async function loadAll(refresh){if(REFRESHING)return;REFRESHING=true;var k=$('key').value.trim();if(!k){setStatus(t('enterKeyFirst'),'err');REFRESHING=false;return}KEY=k;localStorage.setItem('f2a-key',KEY);if(refresh){var pb=$('probeBtn');if(pb){pb.disabled=true;pb.textContent=t('probing')}}setStatus(t('loading'));try{var u=await get('/admin/usage'),a=await get('/admin/accounts'+(refresh?'?refresh=1':'')),l=await get('/admin/log');LAST_USAGE=u;LAST_ACCTS=a.accounts;renderUsage(u);renderLatency(l);fillChartSelect(u.by_day_model||{});renderChart(u.days||[],u.by_day_model||{});renderKeys(u.keys||[]);renderHeatmap(u.hours||{});renderDonut(u.by_model||{});renderAccounts(a);renderAcctErrors(a);renderMatrix(a,MODEL_IDS);renderLog(l);updateReset();$('authCard').classList.add('collapsed');$('disconnect').style.display='';setStatus(t('updated',new Date().toLocaleTimeString()),'ok')}catch(e){setStatus(e.message,'err');$('accounts').textContent=t('authFailed',e.message);banner(t('authFailed',e.message))}finally{REFRESHING=false;if(refresh){var pb2=$('probeBtn');if(pb2){pb2.disabled=false;pb2.textContent=t('reprobe')}}}}
+function disconnect(){KEY='';localStorage.removeItem('f2a-key');$('authCard').classList.remove('collapsed');$('disconnect').style.display='none';$('resetCount').textContent='';setStatus(t('disconnected'),'')}
+function updateReset(){var el=$('resetCount');if(!el)return;var ts=null;(LAST_ACCTS||[]).forEach(function(x){Object.keys(x.quota||{}).forEach(function(m){var v=x.quota[m];if(v&&v.reset_at){var t0=new Date(v.reset_at).getTime();if(isFinite(t0)&&(!ts||t0<ts))ts=t0}})});if(!ts){var now=new Date();ts=Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()+1)}var diff=ts-Date.now();if(diff<=0){el.textContent='';return}var s=Math.floor(diff/1000),h=Math.floor(s/3600),mi=Math.floor(s%3600/60),se=s%60;var pad=function(n){return (n<10?'0'+n:''+n)};var target=ts?new Date(ts).toISOString().slice(11,16):'';el.innerHTML=t('dailyReset')+': <b>'+pad(h)+':'+pad(mi)+':'+pad(se)+'</b> <span class="muted">-&gt; '+target+'Z</span>'}
+function renderUsage(u){var req=u.requests||0,ok=u.successes||0,err=u.errors||0;var sr=req?(ok/req):0,er=req?(err/req):0;var d=u.days||[];var prev=d.length>1?d[1].requests:null;var cur=d.length?d[0].requests:req;var cards=[[t('requests'),req,deltaChip(cur,prev)],[t('successRate'),fmtPct(sr),''],[t('errorRate'),fmtPct(er),''],[t('inputChars'),u.input_characters,''],[t('outputChars'),u.output_characters,''],[t('uptime'),fmtDur(u.uptime_seconds),'']];$('usage').innerHTML=cards.map(function(x){return '<div class="card"><b>'+esc(x[1])+'</b><span>'+esc(x[0])+'</span>'+x[2]+'</div>'}).join('');var rows=Object.keys(u.by_model||{}).map(function(m){var v=u.by_model[m];return '<tr><td><code>'+esc(m)+'</code></td><td class="num">'+v.requests+'</td><td class="num">'+v.successes+'</td><td class="num">'+v.errors+'</td></tr>'}).join('');$('byModel').innerHTML=rows?'<table><thead><tr><th>'+t('model')+'</th><th class="num">'+t('requests')+'</th><th class="num">'+t('ok')+'</th><th class="num">'+t('err')+'</th></tr></thead><tbody>'+rows+'</tbody></table>':'<p class="muted">'+t('noRequests')+'</p>';$('usageTime').textContent='('+u.version+')'}
+function renderLatency(l){if(!l||!l.entries||!l.entries.length)return;var ms=[];l.entries.forEach(function(e){if(e.ms!=null)ms.push(e.ms)});if(!ms.length)return;ms.sort(function(a,b){return a-b});var p=function(p){var i=Math.min(ms.length-1,Math.floor(p*ms.length));return ms[i]};var lat='<div class="card"><b>'+p(0.5)+'ms</b><span>'+t('p50')+'</span></div><div class="card"><b>'+p(0.95)+'ms</b><span>'+t('p95')+'</span></div>';$('usage').innerHTML+=lat}
+function fillChartSelect(bdm){var ids=MODEL_IDS.length?MODEL_IDS:Object.keys(bdm||{});var cur=$('chartModel').value;var opts=['<option value="all">'+t('allModels')+'</option>'].concat(ids.map(function(id){return '<option value="'+esc(id)+'">'+esc(id)+'</option>'}));$('chartModel').innerHTML=opts.join('');$('chartModel').value=(cur&&ids.indexOf(cur)>=0)?cur:'all'}
 function renderChart(days,bdm){LAST_DAYS=days;LAST_BDM=bdm;chartSel()}
 function chartSel(){var range=parseInt($('chartRange').value||'14',10);var days=(LAST_DAYS||[]).slice(0,range);drawChart(days,LAST_BDM||{},$('chartModel').value)}
-function drawChart(days,bdm,sel){var el=$('chart');if(!days||!days.length){el.innerHTML='<p class="muted">No daily data yet.</p>';return}var data=days.map(function(d){if(sel&&sel!=='all'&&bdm&&bdm[d.date]){var m=bdm[d.date][sel]||{};return{req:(m.requests||0),ok:(m.successes||0),err:(m.errors||0)}}var ok=d.successes||0,err=d.errors||0;return{req:ok+err,ok:ok,err:err}});var max=1;data.forEach(function(v){if(v.req>max)max=v.req});var W=560,left=30,pad=4,h=130,baseY=h-20,plotW=W-left-pad*2;var bw=Math.max(4,plotW/Math.max(data.length,1)-2);var scale=function(v){return Math.round((v/max)*(h-30))};var bars=data.map(function(v,i){var x=left+pad+i*(bw+2);var eh=v.req?Math.max(1,scale(v.err)):0;var oh=v.req?Math.max(1,scale(v.ok)):0;var yTop=baseY-eh-oh;var tt=days[i].date+': '+v.req+' req ('+v.ok+' ok, '+v.err+' err)';var lab=v.req?'<text x="'+(x+bw/2)+'" y="'+(yTop-3)+'" font-size="10" text-anchor="middle" fill="var(--muted)">'+v.req+'</text>':'';var fr='';if(v.err)fr+='<rect x="'+x+'" y="'+(baseY-eh)+'" width="'+bw+'" height="'+eh+'" rx="1" fill="var(--err)" data-tip="'+esc(tt)+'" style="animation-delay:'+(i*25)+'ms"></rect>';if(v.ok)fr+='<rect x="'+x+'" y="'+yTop+'" width="'+bw+'" height="'+oh+'" rx="1" fill="var(--accent)" data-tip="'+esc(tt)+'" style="animation-delay:'+(i*25)+'ms"></rect>';return fr+lab}).join('');var grid=function(v,y){return '<line x1="'+left+'" y1="'+y+'" x2="'+(W-pad)+'" y2="'+y+'" stroke="var(--border)" stroke-width="1" stroke-dasharray="2 3"/><text x="'+(left-5)+'" y="'+(y+3)+'" font-size="9" text-anchor="end" fill="var(--muted)">'+v+'</text>'};var axis=grid(max,baseY-scale(max))+grid(Math.max(1,Math.round(max/2)),baseY-scale(Math.max(1,Math.round(max/2))))+grid(0,baseY);var trend=(function(){var pts=[];for(var i=0;i<data.length;i++){var s=0,n=0;for(var j=Math.max(0,i-6);j<=i;j++){s+=data[j].req;n++}var avg=s/n;var x=left+pad+i*(bw+2)+bw/2;pts.push(x+','+(baseY-scale(avg)))}return '<polyline points="'+pts.join(' ')+'" fill="none" stroke="var(--warn)" stroke-width="1.5" opacity="0.9"><title>7-day trailing average</title></polyline>'})();var labels=days.map(function(d,i){var x=left+pad+i*(bw+2);return '<text x="'+x+'" y="'+(baseY+12)+'" font-size="11" fill="var(--muted)">'+d.date.slice(5)+'</text>'}).join('');var legend='<div class="row" style="margin-bottom:6px"><span class="muted" style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:10px;height:10px;background:var(--accent);border-radius:1px"></span>ok</span><span class="muted" style="display:inline-flex;align-items:center;gap:4px;margin-left:12px"><span style="display:inline-block;width:10px;height:10px;background:var(--err);border-radius:1px"></span>err</span><span class="muted" style="display:inline-flex;align-items:center;gap:4px;margin-left:12px"><span style="display:inline-block;width:14px;height:2px;background:var(--warn)"></span>7d avg</span></div>';el.innerHTML=legend+'<svg viewBox="0 0 '+W+' '+h+'" style="width:100%;height:auto">'+axis+bars+trend+labels+'</svg>'}
-function renderHeatmap(hours){var el=$('heatmap');if(!hours||!Object.keys(hours).length){el.innerHTML='<p class="muted">No hourly data yet.</p>';return}var dates=Object.keys(hours).sort().slice(-7);var max=1;dates.forEach(function(d){Object.keys(hours[d]).forEach(function(h){if(hours[d][h].requests>max)max=hours[d][h].requests})});var head='<tr><th>date</th>'+Array.from({length:24},function(_,h){return '<th>'+h+'</th>'}).join('')+'</tr>';var rows=dates.map(function(d){var cells=Array.from({length:24},function(_,h){var v=hours[d][String(h).padStart(2,'0')];var n=v?v.requests:0;var a=n?Math.max(0.08,Math.min(1,n/max)):0;var bg=a?'rgba(148,226,213,'+a.toFixed(2)+')':'';return '<td style="background:'+bg+'" data-tip="'+esc(d+' '+h+':00Z: '+n+' req')+'"></td>'}).join('');return '<tr><td class="muted">'+d.slice(5)+'</td>'+cells+'</tr>'}).join('');el.innerHTML='<table class="heatgrid"><thead>'+head+'</thead><tbody>'+rows+'</tbody></table>'}
+function drawChart(days,bdm,sel){var el=$('chart');if(!days||!days.length){el.innerHTML='<p class="muted">'+t('noDailyData')+'</p>';return}var data=days.map(function(d){if(sel&&sel!=='all'&&bdm&&bdm[d.date]){var m=bdm[d.date][sel]||{};return{req:(m.requests||0),ok:(m.successes||0),err:(m.errors||0)}}var ok=d.successes||0,err=d.errors||0;return{req:ok+err,ok:ok,err:err}});var max=1;data.forEach(function(v){if(v.req>max)max=v.req});var W=560,left=30,pad=4,h=130,baseY=h-20,plotW=W-left-pad*2;var bw=Math.max(4,plotW/Math.max(data.length,1)-2);var scale=function(v){return Math.round((v/max)*(h-30))};var bars=data.map(function(v,i){var x=left+pad+i*(bw+2);var eh=v.req?Math.max(1,scale(v.err)):0;var oh=v.req?Math.max(1,scale(v.ok)):0;var yTop=baseY-eh-oh;var tt=days[i].date+': '+v.req+' req ('+v.ok+' ok, '+v.err+' err)';var lab=v.req?'<text x="'+(x+bw/2)+'" y="'+(yTop-3)+'" font-size="10" text-anchor="middle" fill="var(--muted)">'+v.req+'</text>':'';var fr='';if(v.err)fr+='<rect x="'+x+'" y="'+(baseY-eh)+'" width="'+bw+'" height="'+eh+'" rx="1" fill="var(--err)" data-tip="'+esc(tt)+'" style="animation-delay:'+(i*25)+'ms"></rect>';if(v.ok)fr+='<rect x="'+x+'" y="'+yTop+'" width="'+bw+'" height="'+oh+'" rx="1" fill="var(--accent)" data-tip="'+esc(tt)+'" style="animation-delay:'+(i*25)+'ms"></rect>';return fr+lab}).join('');var grid=function(v,y){return '<line x1="'+left+'" y1="'+y+'" x2="'+(W-pad)+'" y2="'+y+'" stroke="var(--border)" stroke-width="1" stroke-dasharray="2 3"/><text x="'+(left-5)+'" y="'+(y+3)+'" font-size="9" text-anchor="end" fill="var(--muted)">'+v+'</text>'};var axis=grid(max,baseY-scale(max))+grid(Math.max(1,Math.round(max/2)),baseY-scale(Math.max(1,Math.round(max/2))))+grid(0,baseY);var trend=(function(){var pts=[];for(var i=0;i<data.length;i++){var s=0,n=0;for(var j=Math.max(0,i-6);j<=i;j++){s+=data[j].req;n++}var avg=s/n;var x=left+pad+i*(bw+2)+bw/2;pts.push(x+','+(baseY-scale(avg)))}return '<polyline points="'+pts.join(' ')+'" fill="none" stroke="var(--warn)" stroke-width="1.5" opacity="0.9"><title>'+t('trendTip')+'</title></polyline>'})();var labels=days.map(function(d,i){var x=left+pad+i*(bw+2);return '<text x="'+x+'" y="'+(baseY+12)+'" font-size="11" fill="var(--muted)">'+d.date.slice(5)+'</text>'}).join('');var legend='<div class="row" style="margin-bottom:6px"><span class="muted" style="display:inline-flex;align-items:center;gap:4px"><span style="display:inline-block;width:10px;height:10px;background:var(--accent);border-radius:1px"></span>'+t('ok')+'</span><span class="muted" style="display:inline-flex;align-items:center;gap:4px;margin-left:12px"><span style="display:inline-block;width:10px;height:10px;background:var(--err);border-radius:1px"></span>'+t('err')+'</span><span class="muted" style="display:inline-flex;align-items:center;gap:4px;margin-left:12px"><span style="display:inline-block;width:14px;height:2px;background:var(--warn)"></span>'+t('avg7d')+'</span></div>';el.innerHTML=legend+'<svg viewBox="0 0 '+W+' '+h+'" style="width:100%;height:auto">'+axis+bars+trend+labels+'</svg>'}
+function renderHeatmap(hours){var el=$('heatmap');if(!hours||!Object.keys(hours).length){el.innerHTML='<p class="muted">'+t('noHourlyData')+'</p>';return}var dates=Object.keys(hours).sort().slice(-7);var max=1;dates.forEach(function(d){Object.keys(hours[d]).forEach(function(h){if(hours[d][h].requests>max)max=hours[d][h].requests})});var head='<tr><th>'+t('date')+'</th>'+Array.from({length:24},function(_,h){return '<th>'+h+'</th>'}).join('')+'</tr>';var rows=dates.map(function(d){var cells=Array.from({length:24},function(_,h){var v=hours[d][String(h).padStart(2,'0')];var n=v?v.requests:0;var a=n?Math.max(0.08,Math.min(1,n/max)):0;var bg=a?'rgba(148,226,213,'+a.toFixed(2)+')':'';return '<td style="background:'+bg+'" data-tip="'+esc(d+' '+h+':00Z: '+n+' req')+'"></td>'}).join('');return '<tr><td class="muted">'+d.slice(5)+'</td>'+cells+'</tr>'}).join('');el.innerHTML='<table class="heatgrid"><thead>'+head+'</thead><tbody>'+rows+'</tbody></table>'}
 function sparkline(days){if(!days||!days.length)return '<span class="muted">-</span>';var max=1;days.forEach(function(d){if(d.requests>max)max=d.requests});var bars=days.slice(0,14).map(function(d){var hh=Math.max(2,Math.round((d.requests/max)*20));var cls=d.errors>0?(d.errors>=d.requests?'err':'warn'):'';return '<i class="'+cls+'" style="height:'+hh+'px" title="'+d.date+': '+d.requests+' req, '+d.errors+' err"></i>'}).join('');return '<span class="spark">'+bars+'</span>'}
 function resetTime(){var now=new Date();var next=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()+1));var diff=next-now;var h=Math.floor(diff/3600000),m=Math.floor(diff%3600000/60000);return (h<10?'0'+h:h)+':'+(m<10?'0'+m:m)}
-function renderKeys(keys){var el=$('keys');if(!keys||!keys.length){el.innerHTML='<p class="muted">No keys configured.</p>';return}var rt=resetTime();var rows=keys.map(function(k){var lim=k.limit?'daily limit '+k.limit:'unlimited';var res=k.limit?'<span class="muted">resets '+rt+' UTC</span>':'';var st=k.enabled?'<span class="pill ok">on</span>':'<span class="pill bad">off</span>';var act=k.managed?'<button class="ghost small" onclick="removeKey(\\''+esc(k.prefix)+'\\')">Del</button> <button class="ghost small" onclick="toggleKey(\\''+esc(k.prefix)+'\\',\\''+(k.enabled?'disable':'enable')+'\\')">'+(k.enabled?'Dis':'En')+'</button>':'<span class="muted">env</span>';return '<tr><td><code>'+esc(k.prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc(lim)+'</td><td class="num">'+k.today_requests+'</td><td class="num">'+k.today_successes+'</td><td class="num">'+k.today_errors+'</td><td>'+sparkline(k.days)+'</td><td>'+res+'</td><td>'+act+'</td></tr>'}).join('');el.innerHTML='<table><thead><tr><th>Key</th><th>State</th><th>Limit</th><th class="num">Req</th><th class="num">OK</th><th class="num">Err</th><th>14d</th><th>Reset</th><th></th></tr></thead><tbody>'+rows+'</tbody></table>'}
-function renderAccounts(a){var rows=a.accounts.map(function(x){var st=x.alive===true?'<span class="pill ok">alive</span>':x.alive===false?'<span class="pill bad">invalid</span>':'<span class="pill unk">unknown</span>';var lu=x.last_used_at?new Date(x.last_used_at).toLocaleTimeString():'<span class="muted">-</span>';var le=x.last_error?esc(x.last_error)+' <span class="muted">('+((x.last_error_at||'').slice(5,19).replace('T',' '))+')</span>':'<span class="muted">-</span>';return '<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc(x.uid||'-')+'</td><td class="num">'+(x.requests||0)+'</td><td>'+lu+'</td><td>'+le+'</td></tr>'}).join('');$('accounts').innerHTML='<table><thead><tr><th>Account</th><th>Status</th><th>UID</th><th class="num">Req</th><th>Last used</th><th>Last error</th></tr></thead><tbody>'+rows+'</tbody></table>'}
-function qcell(v){if(!v||v.used==null||v.limit==null)return '<span class="qcell">- / -</span>';var ratio=v.limit>0?v.used/v.limit:0;var cls=ratio>=1?'exh':ratio>=0.8?'warn':'ok';var tt=v.used+' / '+v.limit+(v.reset_at?' · resets '+v.reset_at.slice(11,16)+'Z':'')+(v.reset_time_zone?' '+v.reset_time_zone:'');return '<span class="qcell '+cls+'" title="'+tt+'">'+v.used+' / '+v.limit+'</span>'}
-function renderMatrix(a,modelIds){var el=$('quotaMatrix');var accts=a.accounts||[];var models=modelIds&&modelIds.length?modelIds:[];if(!models.length){var seen={};accts.forEach(function(x){Object.keys(x.quota||{}).forEach(function(m){seen[m]=1})});models=Object.keys(seen)}if(!accts.length){el.innerHTML='<p class="muted">No accounts.</p>';return}var head='<thead><tr><th>Account</th>'+models.map(function(m){return '<th title="'+esc(m)+'">'+esc(m.replace(/^.*\\//,''))+'</th>'}).join('')+'</tr></thead>';var body=accts.map(function(x){var q=x.quota||{};return '<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code><div class="muted">probed '+((x.checked_at||'').slice(11,16)||'?')+'Z</div></td>'+models.map(function(m){return '<td>'+qcell(q[m])+'</td>'}).join('')+'</tr>'}).join('');el.innerHTML='<table>'+head+'<tbody>'+body+'</tbody></table>'}
-function renderAcctErrors(a){var el=$('acctErrors');var rows=[];(a.accounts||[]).forEach(function(x){var es=x.last_errors||[];es.forEach(function(e){var st=e.status?'<span class="pill '+(e.status>=500?'bad':e.status>=400?'warn':'ok')+'">'+e.status+'</span>':'<span class="pill unk">?</span>';rows.push('<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc((e.time||'').slice(5,19).replace('T',' '))+'</td><td>'+esc(e.message||'')+'</td></tr>')})});el.innerHTML=rows.length?'<table><thead><tr><th>Account</th><th>Status</th><th>Time</th><th>Message</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>':'<p class="muted">No recorded errors.</p>'}
-function renderLog(l){var el=$('reqlog');if(!l||!l.entries||!l.entries.length){el.innerHTML='<p class="muted">No requests logged yet.</p>';return}var rows=l.entries.map(function(e){var st=e.status<400?'<span class="pill ok">'+e.status+'</span>':e.status===429?'<span class="pill warn">429</span>':'<span class="pill bad">'+e.status+'</span>';return '<tr><td class="muted">'+esc((e.t||'').slice(11,19))+'</td><td><code>'+esc(e.model||'')+'</code></td><td><code>'+esc(e.key||'')+'</code></td><td>'+st+'</td><td class="num">'+(e.ms!=null?e.ms+'ms':'')+'</td><td><code>'+esc(e.acct||'-')+'</code></td></tr>'}).join('');el.innerHTML='<table><thead><tr><th>Time</th><th>Model</th><th>Key</th><th>Status</th><th class="num">Latency</th><th>Account</th></tr></thead><tbody>'+rows+'</tbody></table>'}
-async function loadModels(){try{var m=await (await fetch('/admin/models')).json();STORE_MODELS=m.data;MODEL_IDS=m.data.map(function(x){return x.id});renderModels(m.data)}catch(e){$('models').textContent='Models load failed: '+e.message}}
+function renderKeys(keys){var el=$('keys');if(!keys||!keys.length){el.innerHTML='<p class="muted">'+t('noKeys')+'</p>';return}var rt=resetTime();var rows=keys.map(function(k){var lim=k.limit?t('dailyLimitN',k.limit):t('unlimited');var res=k.limit?'<span class="muted">'+t('resetsAt',rt)+'</span>':'';var st=k.enabled?'<span class="pill ok">'+t('on')+'</span>':'<span class="pill bad">'+t('off')+'</span>';var act=k.managed?'<button class="ghost small" onclick="removeKey(\\''+esc(k.prefix)+'\\')">'+t('del')+'</button> <button class="ghost small" onclick="toggleKey(\\''+esc(k.prefix)+'\\',\\''+(k.enabled?'disable':'enable')+'\\')">'+(k.enabled?t('dis'):t('en'))+'</button>':'<span class="muted">env</span>';return '<tr><td><code>'+esc(k.prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc(lim)+'</td><td class="num">'+k.today_requests+'</td><td class="num">'+k.today_successes+'</td><td class="num">'+k.today_errors+'</td><td>'+sparkline(k.days)+'</td><td>'+res+'</td><td>'+act+'</td></tr>'}).join('');el.innerHTML='<table><thead><tr><th>'+t('key')+'</th><th>'+t('state')+'</th><th>'+t('limit')+'</th><th class="num">'+t('req')+'</th><th class="num">'+t('ok')+'</th><th class="num">'+t('err')+'</th><th>14d</th><th>'+t('reset')+'</th><th></th></tr></thead><tbody>'+rows+'</tbody></table>'}
+function renderAccounts(a){var rows=a.accounts.map(function(x){var st=x.alive===true?'<span class="pill ok">'+t('alive')+'</span>':x.alive===false?'<span class="pill bad">'+t('invalid')+'</span>':'<span class="pill unk">'+t('unknown')+'</span>';var lu=x.last_used_at?new Date(x.last_used_at).toLocaleTimeString():'<span class="muted">-</span>';var le=x.last_error?esc(x.last_error)+' <span class="muted">('+((x.last_error_at||'').slice(5,19).replace('T',' '))+')</span>':'<span class="muted">-</span>';return '<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc(x.uid||'-')+'</td><td class="num">'+(x.requests||0)+'</td><td>'+lu+'</td><td>'+le+'</td></tr>'}).join('');$('accounts').innerHTML='<table><thead><tr><th>'+t('account')+'</th><th>'+t('status')+'</th><th>UID</th><th class="num">'+t('req')+'</th><th>'+t('lastUsed')+'</th><th>'+t('lastError')+'</th></tr></thead><tbody>'+rows+'</tbody></table>'}
+function qcell(v){if(!v||v.used==null||v.limit==null)return '<span class="qcell">- / -</span>';var ratio=v.limit>0?v.used/v.limit:0;var cls=ratio>=1?'exh':ratio>=0.8?'warn':'ok';var tt=v.used+' / '+v.limit+(v.reset_at?' · '+t('resetAt',v.reset_at.slice(11,16)+'Z'):'')+(v.reset_time_zone?' '+v.reset_time_zone:'');return '<span class="qcell '+cls+'" title="'+tt+'">'+v.used+' / '+v.limit+'</span>'}
+function renderMatrix(a,modelIds){var el=$('quotaMatrix');var accts=a.accounts||[];var models=modelIds&&modelIds.length?modelIds:[];if(!models.length){var seen={};accts.forEach(function(x){Object.keys(x.quota||{}).forEach(function(m){seen[m]=1})});models=Object.keys(seen)}if(!accts.length){el.innerHTML='<p class="muted">'+t('noAccounts')+'</p>';return}var head='<thead><tr><th>Account</th>'+models.map(function(m){return '<th title="'+esc(m)+'">'+esc(m.replace(/^.*\\//,''))+'</th>'}).join('')+'</tr></thead>';var body=accts.map(function(x){var q=x.quota||{};return '<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code><div class="muted">'+t('probedAt',((x.checked_at||'').slice(11,16)||'?')+'Z')+'</div></td>'+models.map(function(m){return '<td>'+qcell(q[m])+'</td>'}).join('')+'</tr>'}).join('');el.innerHTML='<table>'+head+'<tbody>'+body+'</tbody></table>'}
+function renderAcctErrors(a){var el=$('acctErrors');var rows=[];(a.accounts||[]).forEach(function(x){var es=x.last_errors||[];es.forEach(function(e){var st=e.status?'<span class="pill '+(e.status>=500?'bad':e.status>=400?'warn':'ok')+'">'+e.status+'</span>':'<span class="pill unk">?</span>';rows.push('<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc((e.time||'').slice(5,19).replace('T',' '))+'</td><td>'+esc(e.message||'')+'</td></tr>')})});el.innerHTML=rows.length?'<table><thead><tr><th>'+t('account')+'</th><th>'+t('status')+'</th><th>'+t('time')+'</th><th>'+t('message')+'</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>':'<p class="muted">'+t('noErrors')+'</p>'}
+function renderLog(l){var el=$('reqlog');if(!l||!l.entries||!l.entries.length){el.innerHTML='<p class="muted">'+t('noRequests')+'</p>';return}var rows=l.entries.map(function(e){var st=e.status<400?'<span class="pill ok">'+e.status+'</span>':e.status===429?'<span class="pill warn">429</span>':'<span class="pill bad">'+e.status+'</span>';return '<tr><td class="muted">'+esc((e.t||'').slice(11,19))+'</td><td><code>'+esc(e.model||'')+'</code></td><td><code>'+esc(e.key||'')+'</code></td><td>'+st+'</td><td class="num">'+(e.ms!=null?e.ms+'ms':'')+'</td><td><code>'+esc(e.acct||'-')+'</code></td></tr>'}).join('');el.innerHTML='<table><thead><tr><th>'+t('time')+'</th><th>'+t('model')+'</th><th>'+t('key')+'</th><th>'+t('status')+'</th><th class="num">'+t('latency')+'</th><th>'+t('account')+'</th></tr></thead><tbody>'+rows+'</tbody></table>'}
+async function loadModels(){try{var m=await (await fetch('/admin/models')).json();STORE_MODELS=m.data;MODEL_IDS=m.data.map(function(x){return x.id});renderModels(m.data)}catch(e){$('models').textContent=t('modelsLoadFailed',e.message)}}
 var DONUT_COLORS=['#94e2d5','#89b4fa','#a6e3a1','#f9e2af','#cba6f7','#f38ba8','#fab387','#b4befe'];
-function renderDonut(byModel){var el=$('modelShare');if(!byModel||!Object.keys(byModel).length){el.innerHTML='<p class="muted">No model usage yet.</p>';return}var total=0;var entries=Object.keys(byModel).map(function(m){total+=byModel[m].requests||0;return{m:m,req:byModel[m].requests||0}}).sort(function(a,b){return b.req-a.req});if(!total){el.innerHTML='<p class="muted">No model usage yet.</p>';return}var r=52,c=2*Math.PI*r;var off=0;var segs=entries.map(function(e,i){var frac=e.req/total;var seg='<circle r="'+r+'" cx="70" cy="70" fill="none" stroke="'+DONUT_COLORS[i%DONUT_COLORS.length]+'" stroke-width="16" stroke-dasharray="'+(frac*c).toFixed(1)+' '+(c-frac*c).toFixed(1)+'" stroke-dashoffset="'+(-off*c).toFixed(1)+'" transform="rotate(-90 70 70)" data-tip="'+esc(e.m+': '+e.req+' req ('+Math.round(frac*100)+'%)')+'"></circle>';off+=frac;return seg}).join('');var legend=entries.map(function(e,i){return '<div class="muted" style="display:flex;align-items:center;gap:6px;margin:2px 0"><span style="display:inline-block;width:10px;height:10px;background:'+DONUT_COLORS[i%DONUT_COLORS.length]+';border-radius:1px"></span><code>'+esc(e.m)+'</code><b>'+e.req+'</b><span>('+Math.round(e.req/total*100)+'%)</span></div>'}).join('');el.innerHTML='<div class="row" style="align-items:flex-start"><svg viewBox="0 0 140 140" style="width:150px;height:auto">'+segs+'<text x="70" y="75" text-anchor="middle" font-size="15" fill="var(--text)">'+total+'</text></svg><div style="margin-left:14px;flex:1;min-width:240px">'+legend+'</div></div>'}
-function renderModels(list){$('models').innerHTML='<table><thead><tr><th>API model id</th><th>Upstream agent</th><th>State</th><th></th></tr></thead><tbody>'+list.map(function(x){var pill=x.disabled?'<span class="pill bad">disabled</span>':'<span class="pill ok">enabled</span>';var btn=x.disabled?'<button class="ghost small" onclick="toggleModel(\\''+esc(x.id)+'\\',false)">Enable</button>':'<button class="ghost small" onclick="toggleModel(\\''+esc(x.id)+'\\',true)">Disable</button>';return '<tr><td><code>'+esc(x.id)+'</code></td><td><code>'+esc(x.agent)+'</code></td><td>'+pill+'</td><td>'+btn+'</td></tr>'}).join('')+'</tbody></table>'}
-async function toggleModel(id,disabled){try{var r=await fetch('/admin/models/toggle',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({model:id,disabled:disabled})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}STORE_MODELS=null;MODEL_IDS=(j.data||[]).map(function(x){return x.id});renderModels(j.data||[]);setStatus('Model '+id+' '+(disabled?'disabled':'enabled'),'ok')}catch(e){setStatus(e.message,'err')}}
-async function addKey(){var k=$('newKey').value.trim();var lim=parseInt($('newKeyLimit').value||'0',10);if(!k){setStatus('Enter a key first','err');return}try{var r=await fetch('/admin/keys',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({action:'add',key:k,limit:isFinite(lim)?lim:0})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}$('newKey').value='';$('newKeyLimit').value='';loadAll(false);setStatus('Key added','ok')}catch(e){setStatus(e.message,'err')}}
-async function removeKey(prefix){var k=prompt('Full key to remove (first 8: '+prefix+')','');if(!k)return;try{var r=await fetch('/admin/keys',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({action:'remove',key:k})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}loadAll(false);setStatus('Key removed','ok')}catch(e){setStatus(e.message,'err')}}
-async function toggleKey(prefix,action){var k=prompt('Full key to '+(action==='disable'?'disable':'enable')+' (first 8: '+prefix+')','');if(!k)return;try{var r=await fetch('/admin/keys',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({action:action,key:k})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}loadAll(false);setStatus('Key '+(action==='disable'?'disabled':'enabled'),'ok')}catch(e){setStatus(e.message,'err')}}
-async function testAlert(){try{var r=await fetch('/admin/alerts/test',{method:'POST',headers:authHeaders()});var j=await r.json();$('alertResult').textContent=j.ok?'sent':'failed: '+(j.error||'');$('alertResult').style.color=j.ok?'var(--ok)':'var(--err)'}catch(e){$('alertResult').textContent='error: '+e.message}}
-async function toggleMaint(){try{var r=await fetch('/admin/maintenance',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({on:$('maintState').textContent==='off'})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}$('maintState').textContent=j.maintenance?'on':'off';$('maintBtn').textContent=j.maintenance?'Disable':'Enable';setStatus('Maintenance '+(j.maintenance?'on':'off'),'ok')}catch(e){setStatus(e.message,'err')}}
-async function loadState(){try{var s=await get('/admin/state');var rows=(s.accounts||[]).map(function(a){var cd=a.cooldown_until?'<span class="pill warn">'+a.cooldown_seconds+'s</span>':'<span class="muted">-</span>';var al=a.last_alerted_at?(a.last_alerted_at||'').slice(11,19):'-';var sess=(a.sessions||[]).map(function(x){return '<div class="muted">'+esc(x.model)+' <span class="muted">exp '+((x.expiresAt||'').slice(11,19)||'?')+'</span></div>'}).join('')||'<span class="muted">-</span>';return '<tr><td><code>'+esc(a.token_prefix)+'&hellip;</code></td><td>'+(a.alive===true?'<span class="pill ok">alive</span>':a.alive===false?'<span class="pill bad">dead</span>':'<span class="pill unk">?</span>')+'</td><td>'+cd+'</td><td>'+al+'</td><td>'+sess+'</td></tr>'}).join('');$('stateTable').innerHTML='<table><thead><tr><th>Account</th><th>Alive</th><th>Cooldown</th><th>Last alert</th><th>Sessions</th></tr></thead><tbody>'+rows+'</tbody></table>'}catch(e){$('stateTable').innerHTML='<p class="muted">State load failed: '+esc(e.message)+'</p>'}}
+function renderDonut(byModel){var el=$('modelShare');if(!byModel||!Object.keys(byModel).length){el.innerHTML='<p class="muted">'+t('noModelUsage')+'</p>';return}var total=0;var entries=Object.keys(byModel).map(function(m){total+=byModel[m].requests||0;return{m:m,req:byModel[m].requests||0}}).sort(function(a,b){return b.req-a.req});if(!total){el.innerHTML='<p class="muted">'+t('noModelUsage')+'</p>';return}var r=52,c=2*Math.PI*r;var off=0;var segs=entries.map(function(e,i){var frac=e.req/total;var seg='<circle r="'+r+'" cx="70" cy="70" fill="none" stroke="'+DONUT_COLORS[i%DONUT_COLORS.length]+'" stroke-width="16" stroke-dasharray="'+(frac*c).toFixed(1)+' '+(c-frac*c).toFixed(1)+'" stroke-dashoffset="'+(-off*c).toFixed(1)+'" transform="rotate(-90 70 70)" data-tip="'+esc(e.m+': '+e.req+' req ('+Math.round(frac*100)+'%)')+'"></circle>';off+=frac;return seg}).join('');var legend=entries.map(function(e,i){return '<div class="muted" style="display:flex;align-items:center;gap:6px;margin:2px 0"><span style="display:inline-block;width:10px;height:10px;background:'+DONUT_COLORS[i%DONUT_COLORS.length]+';border-radius:1px"></span><code>'+esc(e.m)+'</code><b>'+e.req+'</b><span>('+Math.round(e.req/total*100)+'%)</span></div>'}).join('');el.innerHTML='<div class="row" style="align-items:flex-start"><svg viewBox="0 0 140 140" style="width:150px;height:auto">'+segs+'<text x="70" y="75" text-anchor="middle" font-size="15" fill="var(--text)">'+total+'</text></svg><div style="margin-left:14px;flex:1;min-width:240px">'+legend+'</div></div>'}
+function renderModels(list){$('models').innerHTML='<table><thead><tr><th>'+t('apiModelId')+'</th><th>'+t('upstreamAgent')+'</th><th>'+t('state')+'</th><th></th></tr></thead><tbody>'+list.map(function(x){var pill=x.disabled?'<span class="pill bad">'+t('disabled')+'</span>':'<span class="pill ok">'+t('enabled')+'</span>';var btn=x.disabled?'<button class="ghost small" onclick="toggleModel(\\''+esc(x.id)+'\\',false)">'+t('enable')+'</button>':'<button class="ghost small" onclick="toggleModel(\\''+esc(x.id)+'\\',true)">'+t('disable')+'</button>';return '<tr><td><code>'+esc(x.id)+'</code></td><td><code>'+esc(x.agent)+'</code></td><td>'+pill+'</td><td>'+btn+'</td></tr>'}).join('')+'</tbody></table>'}
+async function toggleModel(id,disabled){try{var r=await fetch('/admin/models/toggle',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({model:id,disabled:disabled})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}STORE_MODELS=null;MODEL_IDS=(j.data||[]).map(function(x){return x.id});renderModels(j.data||[]);setStatus(disabled?t('modelDisabled',id):t('modelEnabled',id),'ok')}catch(e){setStatus(e.message,'err')}}
+async function addKey(){var k=$('newKey').value.trim();var lim=parseInt($('newKeyLimit').value||'0',10);if(!k){setStatus(t('enterKey'),'err');return}try{var r=await fetch('/admin/keys',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({action:'add',key:k,limit:isFinite(lim)?lim:0})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}$('newKey').value='';$('newKeyLimit').value='';loadAll(false);setStatus(t('keyAdded'),'ok')}catch(e){setStatus(e.message,'err')}}
+async function removeKey(prefix){var k=prompt(t('promptRemove',prefix),'');if(!k)return;try{var r=await fetch('/admin/keys',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({action:'remove',key:k})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}loadAll(false);setStatus(t('keyRemoved'),'ok')}catch(e){setStatus(e.message,'err')}}
+async function toggleKey(prefix,action){var k=prompt(action==='disable'?t('promptDisable',prefix):t('promptEnable',prefix),'');if(!k)return;try{var r=await fetch('/admin/keys',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({action:action,key:k})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}loadAll(false);setStatus(action==='disable'?t('keyDisabled'):t('keyEnabled'),'ok')}catch(e){setStatus(e.message,'err')}}
+async function testAlert(){try{var r=await fetch('/admin/alerts/test',{method:'POST',headers:authHeaders()});var j=await r.json();$('alertResult').textContent=j.ok?t('sent'):t('failed',j.error||'?');$('alertResult').style.color=j.ok?'var(--ok)':'var(--err)'}catch(e){$('alertResult').textContent=t('error_',e.message)}}
+async function toggleMaint(){try{var r=await fetch('/admin/maintenance',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({on:$('maintState').textContent==='off'})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}$('maintState').textContent=j.maintenance?t('on'):t('off');$('maintBtn').textContent=j.maintenance?t('disable'):t('enable');setStatus(j.maintenance?t('maintOn'):t('maintOff'),'ok')}catch(e){setStatus(e.message,'err')}}
+async function loadState(){try{var s=await get('/admin/state');var rows=(s.accounts||[]).map(function(a){var cd=a.cooldown_until?'<span class="pill warn">'+a.cooldown_seconds+'s</span>':'<span class="muted">-</span>';var al=a.last_alerted_at?(a.last_alerted_at||'').slice(11,19):'-';var sess=(a.sessions||[]).map(function(x){return '<div class="muted">'+esc(x.model)+' <span class="muted">'+t('exp',((x.expiresAt||'').slice(11,19)||'?'))+'</span></div>'}).join('')||'<span class="muted">-</span>';return '<tr><td><code>'+esc(a.token_prefix)+'&hellip;</code></td><td>'+(a.alive===true?'<span class="pill ok">'+t('alive')+'</span>':a.alive===false?'<span class="pill bad">'+t('dead')+'</span>':'<span class="pill unk">?</span>')+'</td><td>'+cd+'</td><td>'+al+'</td><td>'+sess+'</td></tr>'}).join('');$('stateTable').innerHTML='<table><thead><tr><th>'+t('account')+'</th><th>'+t('alive')+'</th><th>'+t('cooldown')+'</th><th>'+t('lastAlert')+'</th><th>'+t('sessions')+'</th></tr></thead><tbody>'+rows+'</tbody></table>'}catch(e){$('stateTable').innerHTML='<p class="muted">State load failed: '+esc(e.message)+'</p>'}}
 function setAccent(c,save){document.documentElement.style.setProperty('--accent',c);if(save!==true)localStorage.setItem('f2a-accent',c);var dots=document.querySelectorAll('.accdot');dots.forEach(function(d){d.style.background=d.dataset.c===c?'':'none'})}
 function showTip(e,html){var t=$('tip');t.innerHTML=html;t.style.left=(e.clientX+12)+'px';t.style.top=(e.clientY+12)+'px';t.style.display='block'}
 function hideTip(){$('tip').style.display='none'}
 function wireTip(id){var el=$(id);el.addEventListener('mouseover',function(e){var n=e.target&&e.target.closest?e.target.closest('[data-tip]'):null;if(n)showTip(e,n.getAttribute('data-tip'))});el.addEventListener('mouseout',function(){hideTip()})}
 function csvEscape(s){s=String(s==null?'':s);return s.indexOf('"')>=0||s.indexOf(',')>=0?'"'+s.replace(/"/g,'""')+'"':s}
-function exportCsv(){var u=LAST_USAGE;if(!u){setStatus('Load data first','err');return}var lines=['date,requests,successes,errors,input_chars,output_chars'];(u.days||[]).forEach(function(d){lines.push([d.date,d.requests,d.successes,d.errors,d.inputChars||0,d.outputChars||0].join(','))});lines.push('');lines.push('model,requests,successes,errors');Object.keys(u.by_model||{}).forEach(function(m){var v=u.by_model[m];lines.push([csvEscape(m),v.requests,v.successes,v.errors].join(','))});lines.push('');lines.push('key,limit,today_requests');(u.keys||[]).forEach(function(k){lines.push([csvEscape(k.prefix),k.limit||'',k.today_requests].join(','))});var blob=new Blob([lines.join(String.fromCharCode(10))],{type:'text/csv'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='freebuff2api-usage.csv';document.body.appendChild(a);a.click();a.remove();setStatus('CSV downloaded','ok')}
-boot();loadModels();setInterval(function(){if(KEY&&!REFRESHING)loadAll(false)},30000);wireTip('chart');wireTip('modelShare');wireTip('heatmap');
+function exportCsv(){var u=LAST_USAGE;if(!u){setStatus(t('loadDataFirst'),'err');return}var lines=['date,requests,successes,errors,input_chars,output_chars'];(u.days||[]).forEach(function(d){lines.push([d.date,d.requests,d.successes,d.errors,d.inputChars||0,d.outputChars||0].join(','))});lines.push('');lines.push('model,requests,successes,errors');Object.keys(u.by_model||{}).forEach(function(m){var v=u.by_model[m];lines.push([csvEscape(m),v.requests,v.successes,v.errors].join(','))});lines.push('');lines.push('key,limit,today_requests');(u.keys||[]).forEach(function(k){lines.push([csvEscape(k.prefix),k.limit||'',k.today_requests].join(','))});var blob=new Blob([lines.join(String.fromCharCode(10))],{type:'text/csv'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='freebuff2api-usage.csv';document.body.appendChild(a);a.click();a.remove();setStatus('CSV downloaded','ok')}
+boot();loadModels();setInterval(function(){if(KEY&&!REFRESHING)loadAll(false)},30000);setInterval(function(){if(KEY)updateReset()},1000);wireTip('chart');wireTip('modelShare');wireTip('heatmap');
 </script>`;
-}function adminPageResponse() {
-  return new Response(pageShell("freebuff2api console - admin", adminBody()), { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders() } });
+}function adminPageResponse(request) {
+  const lang = langOf(request);
+  return new Response(pageShell("freebuff2api console - admin", adminBody(lang)), { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders() } });
 }
 
 function adminStatus(env) {
