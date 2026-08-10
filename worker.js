@@ -207,6 +207,7 @@ async function handleAdminAccounts(env, forceRefresh) {
       last_used_at: info && info.lastUsedAt ? new Date(info.lastUsedAt).toISOString() : null,
       last_error: info && info.lastErrors && info.lastErrors.length ? info.lastErrors[info.lastErrors.length - 1].message : null,
       last_error_at: info && info.lastErrors && info.lastErrors.length ? info.lastErrors[info.lastErrors.length - 1].time : null,
+      last_errors: info && info.lastErrors ? info.lastErrors.slice(-5) : [],
       quota: q,
     });
   }
@@ -224,8 +225,25 @@ async function handleAdminUsage(env) {
     const m = byModel[id] = byModel[id] || { requests: 0, successes: 0, errors: 0, inputChars: 0, outputChars: 0 };
     m[e.key[4]] = (m[e.key[4]] || 0) + e.value;
   }
-  const days = await readDays(s, 14);
   const today = todayStr();
+  const dayItems = await s.list(["usage", "day"]);
+  const byDate = new Map();
+  const byDayModel = {};
+  for (const e of dayItems) {
+    const key = e.key;
+    if (key.length === 4 && key[3] !== "model" && key[3] !== "key") {
+      const date = String(key[2]);
+      let d = byDate.get(date);
+      if (!d) { d = { date, requests: 0, successes: 0, errors: 0, inputChars: 0, outputChars: 0 }; byDate.set(date, d); }
+      d[key[3]] = (d[key[3]] || 0) + e.value;
+    } else if (key.length === 6 && key[3] === "model") {
+      const date = String(key[2]), id = String(key[4]);
+      const m = byDayModel[date] = byDayModel[date] || {};
+      const mm = m[id] = m[id] || { requests: 0, successes: 0, errors: 0 };
+      mm[key[5]] = (mm[key[5]] || 0) + e.value;
+    }
+  }
+  let days = [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 14);
   const dd = usageStats.byDay.get(today);
   if (dd) {
     if (days.length && days[0].date === today) {
@@ -236,6 +254,16 @@ async function handleAdminUsage(env) {
       days.unshift(row);
     }
   }
+  for (const [k, v] of usageStats.byDayModel) {
+    const idx = k.lastIndexOf("\u0000");
+    const date = k.slice(0, idx), id = k.slice(idx + 1);
+    const m = byDayModel[date] = byDayModel[date] || {};
+    const mm = m[id] = m[id] || { requests: 0, successes: 0, errors: 0 };
+    for (const f of ["requests", "successes", "errors"]) mm[f] = (mm[f] || 0) + (v[f] || 0);
+  }
+  const daySet = new Set(days.map((d) => d.date));
+  const byDayModelTrim = {};
+  for (const date of Object.keys(byDayModel)) if (daySet.has(date)) byDayModelTrim[date] = byDayModel[date];
   const keys = [];
   for (const k of parseApiKeys(env)) {
     const prefix = keyPrefixOf(k.key);
@@ -246,7 +274,21 @@ async function handleAdminUsage(env) {
     }
     const d = usageStats.byKey.get(today + "\u0000" + keyId);
     if (d) for (const f of ["requests", "successes", "errors"]) kd[f] += d[f] || 0;
-    keys.push({ prefix, limit: k.limit || null, today_requests: kd.requests, today_successes: kd.successes, today_errors: kd.errors });
+    const kDayMap = new Map();
+    for (const e of dayItems) {
+      if (e.key.length !== 6 || e.key[3] !== "key" || e.key[4] !== keyId) continue;
+      const date = String(e.key[2]);
+      let row = kDayMap.get(date);
+      if (!row) { row = { date, requests: 0, successes: 0, errors: 0 }; kDayMap.set(date, row); }
+      row[e.key[5]] = (row[e.key[5]] || 0) + e.value;
+    }
+    if (d) {
+      let row = kDayMap.get(today);
+      if (!row) { row = { date: today, requests: 0, successes: 0, errors: 0 }; kDayMap.set(today, row); }
+      for (const f of ["requests", "successes", "errors"]) row[f] += d[f] || 0;
+    }
+    const keyDays = [...kDayMap.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 14);
+    keys.push({ prefix, limit: k.limit || null, today_requests: kd.requests, today_successes: kd.successes, today_errors: kd.errors, days: keyDays });
   }
   const customKey = (env.API_KEY || env.FREEBUFF_API_KEY || env.FREEBUFF_API_KEYS || "").trim();
   return jsonResponse({
@@ -260,6 +302,7 @@ async function handleAdminUsage(env) {
     input_characters: total.inputChars,
     output_characters: total.outputChars,
     by_model: byModel,
+    by_day_model: byDayModelTrim,
     days,
     keys,
     note: "Counters persist in KV across restarts; account quotas come from Freebuff.",
@@ -272,66 +315,94 @@ async function handleAdminUsage(env) {
 // ---------------------------------------------------------------------------
 
 const UI_CSS = `
-:root{--bg:#0b1020;--panel:#151c31;--card:#1d2742;--line:#2a3557;--text:#e6ebf7;--muted:#8b98b8;--accent:#4f7cff;--ok:#34d399;--warn:#fbbf24;--err:#f87171}
+:root{--bg:#1e1e2e;--bg-alt:#181825;--panel:#313244;--card:#45475a;--border:#585b70;--text:#cdd6f4;--muted:#a6adc8;--accent:#94e2d5;--ok:#a6e3a1;--warn:#f9e2af;--err:#f38ba8;--sel:#b4befe;--r:3px;--mono:'IBM Plex Mono',ui-monospace,'SF Mono','Cascadia Mono',Menlo,Consolas,monospace}
 *{box-sizing:border-box}
-body{margin:0;font:14px/1.55 system-ui,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text)}
+body{margin:0;font:15px/1.6 var(--mono);background:var(--bg);color:var(--text)}
 a{color:var(--accent);text-decoration:none}
-header{position:sticky;top:0;z-index:10;background:rgba(11,16,32,.92);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-.brand{font-weight:700;font-size:16px;letter-spacing:.3px}
-.brand .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warn);margin-right:8px}
+a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+::selection{background:rgba(148,226,213,.25)}
+header{position:sticky;top:0;z-index:10;background:var(--bg-alt);border-bottom:1px solid var(--border);padding:14px 20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:18px;line-height:1.2;letter-spacing:.04em}
+.brand .dot{display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--warn);margin-right:2px}
 .brand .dot.ok{background:var(--ok)}
 .brand .dot.err{background:var(--err)}
-.tag{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:2px 8px}
-main{max-width:1120px;margin:22px auto;padding:0 18px 60px}
-section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin:16px 0}
-h1{font-size:22px;margin:0 0 4px}
-h2{font-size:15px;margin:0 0 12px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
-.card b{font-size:20px;display:block}
+.brand .prompt{color:var(--accent);font-weight:500}
+.brand .cursor{display:inline-block;width:.55em;height:1.1em;margin-left:2px;background:var(--accent);transform:translateY(3px);animation:cursor-blink 1.06s steps(2,start) infinite}
+@keyframes cursor-blink{to{visibility:hidden}}
+.tag{font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:var(--r);padding:2px 8px}
+.tag.accent{color:var(--accent);border-color:rgba(148,226,213,.4)}
+main{max-width:1200px;margin:22px auto;padding:0 18px 60px}
+section{background:var(--panel);border:1px solid var(--border);border-radius:var(--r);padding:20px;margin:16px 0}
+h1{font-size:18px;margin:0 0 4px;font-weight:700}
+h2{font-size:15px;margin:0 0 12px;font-weight:600}
+h2::before{content:'# ';color:var(--accent)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:16px}
+.card b{font-size:26px;font-weight:600;display:block;line-height:1.15;font-variant-numeric:tabular-nums}
 .card span{color:var(--muted);font-size:12px}
-.banner{border-radius:10px;padding:10px 14px;margin:12px 0;font-size:13px}
-.banner.warn{background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.4)}
+.delta{font-size:12px;display:block;margin-top:2px}
+.delta.up{color:var(--ok)}
+.delta.down{color:var(--err)}
+.delta.flat{color:var(--muted)}
+.banner{border-radius:var(--r);padding:10px 14px;margin:12px 0;font-size:13px}
+.banner.warn{background:rgba(249,226,175,.12);border:1px solid rgba(249,226,175,.4)}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-input,select,textarea,button{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:9px 12px}
+input,select,textarea,button{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:9px 12px}
 input[type=password]{min-width:280px;flex:1}
-button{cursor:pointer;background:var(--accent);border-color:var(--accent);font-weight:600}
-button.ghost{background:transparent;border-color:var(--line)}
+button{cursor:pointer;background:var(--accent);border-color:var(--accent);color:#1e1e2e;font-weight:600}
+button:active{transform:translateY(1px)}
+button.ghost{background:transparent;border-color:var(--border);color:var(--text)}
 button.small{padding:6px 10px;font-size:12px}
 button:disabled{opacity:.5;cursor:not-allowed}
-textarea{width:100%;min-height:120px;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+textarea{width:100%;min-height:120px;resize:vertical;font-size:13px}
 table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
-th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border);font-size:15px;vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+thead th{background:var(--bg-alt)}
 tr:last-child td{border-bottom:0}
-code,pre{font-family:ui-monospace,Menlo,Consolas,monospace}
-pre{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:12px;overflow:auto;font-size:12px;white-space:pre-wrap;word-break:break-word}
+tbody tr:hover{background:rgba(49,50,68,.5)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+code,pre{font-family:var(--mono)}
+code{font-size:13px}
+pre{background:var(--bg-alt);border:1px solid var(--border);border-radius:var(--r);padding:12px;overflow:auto;font-size:13px;white-space:pre-wrap;word-break:break-word}
 .muted{color:var(--muted);font-size:12px}
 .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 0}
-.tabs button{background:transparent;border-color:var(--line);color:var(--muted)}
-.tabs button.active{background:var(--card);border-color:var(--accent);color:var(--text)}
+.tabs button{background:transparent;border-color:var(--border);color:var(--muted)}
+.tabs button.active{background:var(--card);border-color:var(--accent);color:var(--text);box-shadow:inset 0 -2px 0 var(--accent)}
 .panel{display:none}
 .panel.active{display:block}
-.pill{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11px;border:1px solid var(--line)}
-.pill.ok{color:var(--ok);border-color:rgba(52,211,153,.5)}
-.pill.bad{color:var(--err);border-color:rgba(248,113,113,.5)}
+.pill{display:inline-block;padding:2px 9px;border-radius:var(--r);font-size:12px;font-weight:600;border:1px solid var(--border)}
+.pill.ok{color:var(--ok);border-color:rgba(166,227,161,.5)}
+.pill.bad{color:var(--err);border-color:rgba(243,139,168,.5)}
+.pill.warn{color:var(--warn);border-color:rgba(249,226,175,.5)}
 .pill.unk{color:var(--muted)}
-code.inline{background:var(--card);border:1px solid var(--line);border-radius:5px;padding:1px 6px}
+code.inline{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:1px 6px;font-size:13px}
 .healthline{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-.spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+.spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-.btn{display:inline-block;background:var(--accent);color:#fff;border-radius:9px;padding:9px 14px;font-weight:600}
+.btn{display:inline-block;background:var(--accent);color:#1e1e2e;border-radius:var(--r);padding:9px 14px;font-weight:600}
+.qm{overflow-x:auto}
+.qm th,.qm td{white-space:nowrap;padding:6px 10px;font-size:13px}
+.qcell{display:inline-block;min-width:76px;text-align:right;padding:2px 8px;border:1px solid var(--border);border-radius:var(--r);font-size:12px;font-variant-numeric:tabular-nums}
+.qcell.ok{color:var(--ok);border-color:rgba(166,227,161,.35)}
+.qcell.warn{color:var(--warn);border-color:rgba(249,226,175,.45)}
+.qcell.exh{color:var(--err);border-color:rgba(243,139,168,.5)}
+.spark{display:inline-flex;align-items:flex-end;gap:2px;height:22px}
+.spark i{display:inline-block;width:4px;background:var(--accent);border-radius:1px}
+.spark i.warn{background:var(--warn)}
+.spark i.err{background:var(--err)}
+#chart rect{transform-origin:50% 100%;animation:bar-grow .45s cubic-bezier(.22,1,.36,1) backwards}
+@keyframes bar-grow{from{transform:scaleY(0)}}
+@media (prefers-reduced-motion:reduce){.brand .cursor{animation:none}#chart rect{animation:none}button:active{transform:none}}
 @media(max-width:640px){input[type=password]{min-width:100%}}
-`;
-
-function pageShell(title, body, extraHead) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>${UI_CSS}</style>${extraHead || ""}</head><body>${body}</body></html>`;
+`;function pageShell(title, body, extraHead) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet"><style>${UI_CSS}</style>${extraHead || ""}</head><body>${body}</body></html>`;
 }
 
 function landingBody() {
   return `
 <header>
-  <div class="brand"><span class="dot" id="dot"></span>freebuff2api <span class="tag" id="version">console</span></div>
+  <div class="brand"><span class="dot" id="dot"></span><span class="prompt">$</span>freebuff2api<span class="cursor"></span><span class="tag" id="version">console</span></div>
   <div class="tag">Freebuff -&gt; OpenAI / Anthropic format proxy</div>
   <div class="row" style="margin-left:auto"><a class="btn" href="/admin">Open console</a></div>
 </header>
@@ -372,8 +443,9 @@ function landingPage() {
 function adminBody() {
   return `
 <header>
-  <div class="brand"><span class="dot" id="dot"></span>freebuff2api <span class="tag" id="version">console</span></div>
-  <div class="tag">Freebuff -&gt; OpenAI / Anthropic format proxy</div>
+  <div class="brand"><span class="dot" id="dot"></span><span class="prompt">$</span>freebuff2api<span class="cursor"></span><span class="tag" id="version">console</span></div>
+  <div class="tag" id="backend">store: ...</div>
+  <div class="tag accent" id="alertCfg" style="display:none"></div>
   <div class="row" style="margin-left:auto"><a class="btn" href="/">Home</a><button class="ghost small" onclick="loadAll(true)">Refresh</button></div>
 </header>
 <main>
@@ -392,18 +464,24 @@ function adminBody() {
   <button id="tab-models" onclick="switchTab('models')">Models</button>
 </div>
 <section id="panel-overview" class="panel active">
-  <h2>Usage <span class="muted" id="usageTime"></span></h2>
+  <h2>Health <span class="muted" id="usageTime"></span></h2>
   <div id="usage" class="grid"></div>
-  <h2 style="margin-top:18px">Last 14 days</h2>
+  <h2>Traffic <span class="muted">last 14 days</span>
+    <select id="chartModel" onchange="chartSel()" style="width:auto;margin-left:8px"></select>
+  </h2>
   <div id="chart"></div>
-  <h2 style="margin-top:18px">API keys <span class="muted">today</span></h2>
+  <h2>API keys <span class="muted">today + 14d history</span></h2>
   <div id="keys"></div>
-  <h2 style="margin-top:18px">Per model</h2>
+  <h2>Per model <button class="ghost small" onclick="exportCsv()" style="margin-left:8px">Download CSV</button></h2>
   <div id="byModel"></div>
   <p class="muted">Counters persist in KV across restarts. Account quotas come from Freebuff.</p>
 </section>
 <section id="panel-accounts" class="panel">
-  <h2>Accounts &amp; quotas <button class="ghost small" onclick="loadAll(true)">Re-probe accounts</button></h2>
+  <h2>Quota matrix <span class="muted">used / limit per account x model</span> <button class="ghost small" onclick="loadAll(true)" style="margin-left:8px">Re-probe</button></h2>
+  <div class="qm" id="quotaMatrix"><p class="muted">Enter the API key and click Connect.</p></div>
+  <h2>Account errors <span class="muted">last 5 per account</span></h2>
+  <div id="acctErrors"></div>
+  <h2>Account detail</h2>
   <div id="accounts" class="muted">Enter the API key and click Connect.</div>
 </section>
 <section id="panel-models" class="panel">
@@ -413,6 +491,11 @@ function adminBody() {
 </main>
 <script>
 var KEY='';
+var LAST_USAGE=null;
+var LAST_DAYS=[];
+var LAST_BDM={};
+var MODEL_IDS=[];
+var STORE_MODELS=null;
 function $(id){return document.getElementById(id)}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function setStatus(t,kind){var b=$('status');b.textContent=t||'';b.style.color=kind==='ok'?'var(--ok)':kind==='err'?'var(--err)':'inherit'}
@@ -421,18 +504,29 @@ function authHeaders(){return{Authorization:'Bearer '+KEY}}
 async function get(path){var r=await fetch(path,{headers:authHeaders()});var j;try{j=await r.json()}catch(e){j={}}if(!r.ok){throw Error((j&&j.error&&j.error.message)||('HTTP '+r.status))}return j}
 function switchTab(t){['overview','accounts','models'].forEach(function(n){$('panel-'+n).classList.toggle('active',n===t);$('tab-'+n).classList.toggle('active',n===t)});if(t==='models')loadModels()}
 function fmtDur(sec){sec=sec||0;var h=Math.floor(sec/3600),m=Math.floor(sec%3600/60);return h>0?(h+'h '+m+'m'):(m+'m '+(sec%60)+'s')}
+function fmtPct(n){if(n==null||!isFinite(n))return '0%';return Math.round(n*100)+'%'}
 function statusDot(ok){$('dot').className='dot'+(ok?' ok':'')}
-async function boot(){try{var s=await (await fetch('/admin/status')).json();$('version').textContent='v'+s.version;var a=s.auth||{};if(a.api_key_set===false){statusDot(false);banner('Warning: no FREEBUFF_API_KEY is configured on the server, so it only accepts the default key "freebuff-default-key". Set FREEBUFF_API_KEY (or FREEBUFF_API_KEYS) for your own keys.')}else{statusDot(true);banner(a.mode==='default'?'Server uses the default key "freebuff-default-key" (no custom key set).':null)}$('status').textContent=s.accounts+' account(s), '+s.models+' model(s), '+s.key_count+' key(s), up '+fmtDur(s.uptime_seconds)}catch(e){statusDot(false);setStatus('Status probe failed: '+e.message,'err')}}
-async function loadAll(refresh){var k=$('key').value.trim();if(!k){setStatus('Enter the API key first','err');return}KEY=k;setStatus('Loading...');try{var u=await get('/admin/usage'),a=await get('/admin/accounts'+(refresh?'?refresh=1':''));renderUsage(u);renderAccounts(a);setStatus('Updated '+new Date().toLocaleTimeString(),'ok')}catch(e){setStatus(e.message,'err');$('accounts').textContent='Could not load accounts.';banner('Auth failed: '+e.message+' - check that the key matches FREEBUFF_API_KEY.')}}
-function renderUsage(u){$('usage').innerHTML=[['Requests',u.requests],['Successes',u.successes],['Errors',u.errors],['Input chars',u.input_characters],['Output chars',u.output_characters],['Uptime',fmtDur(u.uptime_seconds)]].map(function(x){return '<div class="card"><b>'+esc(x[1])+'</b><span>'+esc(x[0])+'</span></div>'}).join('');renderChart(u.days||[]);renderKeys(u.keys||[]);var rows=Object.keys(u.by_model||{}).map(function(m){var v=u.by_model[m];return '<tr><td><code>'+esc(m)+'</code></td><td>'+v.requests+'</td><td>'+v.successes+'</td><td>'+v.errors+'</td></tr>'}).join('');$('byModel').innerHTML=rows?'<table><tr><th>Model</th><th>Requests</th><th>OK</th><th>Errors</th></tr>'+rows+'</table>':'<p class="muted">No requests yet.</p>';$('usageTime').textContent='('+u.version+')'}
-function renderChart(days){var el=$('chart');if(!days||!days.length){el.innerHTML='<p class="muted">No daily data yet.</p>';return}var max=1;days.forEach(function(d){if(d.requests>max)max=d.requests});var w=560,h=120,pad=4,bw=Math.max(4,(w-pad*2)/Math.max(days.length,1)-2);var bars=days.map(function(d,i){var bh=Math.round((d.requests/max)*(h-24));var x=pad+i*(bw+2);var y=h-20-bh;return '<rect x="'+x+'" y="'+y+'" width="'+bw+'" height="'+bh+'" rx="2" fill="var(--accent)"><title>'+d.date+': '+d.requests+' requests, '+d.successes+' ok, '+d.errors+' errors</title></rect>'}).join('');var labels=days.map(function(d,i){var x=pad+i*(bw+2);return '<text x="'+x+'" y="'+(h-6)+'" font-size="9" fill="var(--muted)">'+d.date.slice(5)+'</text>'}).join('');el.innerHTML='<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto">'+bars+labels+'</svg>'}
-function renderKeys(keys){var el=$('keys');if(!keys||!keys.length){el.innerHTML='<p class="muted">No keys configured.</p>';return}var rows=keys.map(function(k){var lim=k.limit?'daily limit '+k.limit:'unlimited';return '<tr><td><code>'+esc(k.prefix)+'&hellip;</code></td><td>'+esc(lim)+'</td><td>'+k.today_requests+'</td><td>'+k.today_successes+'</td><td>'+k.today_errors+'</td></tr>'}).join('');el.innerHTML='<table><tr><th>Key</th><th>Limit</th><th>Requests today</th><th>OK</th><th>Errors</th></tr>'+rows+'</table>'}
-function renderAccounts(a){var rows=a.accounts.map(function(x){var q=Object.keys(x.quota||{}).map(function(m){var v=x.quota[m];return '<div>'+esc(m)+': '+(v.used==null?'-':v.used)+' / '+(v.limit==null?'-':v.limit)+'</div>'}).join('')||'<span class="muted">no quota data</span>';var st=x.alive===true?'<span class="pill ok">alive</span>':x.alive===false?'<span class="pill bad">invalid</span>':'<span class="pill unk">unknown</span>';var lu=x.last_used_at?new Date(x.last_used_at).toLocaleTimeString():'<span class="muted">-</span>';var le=x.last_error?esc(x.last_error)+' <span class="muted">('+((x.last_error_at||'').slice(5,19).replace('T',' '))+')</span>':'<span class="muted">-</span>';return '<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc(x.uid||'-')+'</td><td>'+(x.requests||0)+'</td><td>'+lu+'</td><td>'+le+'</td><td>'+q+'</td></tr>'}).join('');$('accounts').innerHTML='<table><tr><th>Account</th><th>Status</th><th>UID</th><th>Req</th><th>Last used</th><th>Last error</th><th>Quotas (used / limit)</th></tr>'+rows+'</table>'}
-var STORE_MODELS=null;
-async function loadModels(){if(STORE_MODELS)return renderModels(STORE_MODELS);try{var m=await (await fetch('/admin/models')).json();STORE_MODELS=m.data;renderModels(m.data)}catch(e){$('models').textContent='Models load failed: '+e.message}}
-function renderModels(list){$('models').innerHTML='<table><tr><th>API model id</th><th>Upstream agent</th><th>State</th><th></th></tr>'+list.map(function(x){var pill=x.disabled?'<span class="pill bad">disabled</span>':'<span class="pill ok">enabled</span>';var btn=x.disabled?'<button class="ghost small" onclick="toggleModel(\\''+esc(x.id)+'\\',false)">Enable</button>':'<button class="ghost small" onclick="toggleModel(\\''+esc(x.id)+'\\',true)">Disable</button>';return '<tr><td><code>'+esc(x.id)+'</code></td><td><code>'+esc(x.agent)+'</code></td><td>'+pill+'</td><td>'+btn+'</td></tr>'}).join('')+'</table>'}
-async function toggleModel(id,disabled){try{var r=await fetch('/admin/models/toggle',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({model:id,disabled:disabled})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}STORE_MODELS=null;renderModels(j.data||[]);setStatus('Model '+id+' '+(disabled?'disabled':'enabled'),'ok')}catch(e){setStatus(e.message,'err')}}
-boot();
+function deltaChip(cur,prev){if(cur==null||prev==null||prev<=0)return '<span class="delta flat">-</span>';var d=(cur-prev)/prev;var cls=d>=0?'up':'down';var sign=d>=0?'+':'';return '<span class="delta '+cls+'">'+sign+Math.round(d*100)+'% vs prev day</span>'}
+async function boot(){try{var s=await (await fetch('/admin/status')).json();$('version').textContent='v'+s.version;var a=s.auth||{};if(a.api_key_set===false){statusDot(false);banner('Warning: no FREEBUFF_API_KEY is configured on the server, so it only accepts the default key "freebuff-default-key". Set FREEBUFF_API_KEY (or FREEBUFF_API_KEYS) for your own keys.')}else{statusDot(true);banner(a.mode==='default'?'Server uses the default key "freebuff-default-key" (no custom key set).':null)}$('backend').textContent='store: '+(s.store_backend||'?')+(s.last_flush_at?' | flush ok':' | flush none');var ac=$('alertCfg');if(s.alerts){var parts=[];if(s.alerts.webhook)parts.push('webhook');if(s.alerts.telegram)parts.push('telegram');if(parts.length){ac.style.display='';ac.textContent='alerts: '+parts.join('+')}else{ac.style.display='none'}}else{ac.style.display='none'}$('status').textContent=s.accounts+' account(s), '+s.models+' model(s), '+s.key_count+' key(s), up '+fmtDur(s.uptime_seconds)}catch(e){statusDot(false);setStatus('Status probe failed: '+e.message,'err')}}
+async function loadAll(refresh){var k=$('key').value.trim();if(!k){setStatus('Enter the API key first','err');return}KEY=k;setStatus('Loading...');try{var u=await get('/admin/usage'),a=await get('/admin/accounts'+(refresh?'?refresh=1':''));LAST_USAGE=u;renderUsage(u);fillChartSelect(u.by_day_model||{});renderChart(u.days||[],u.by_day_model||{});renderKeys(u.keys||[]);renderAccounts(a);renderAcctErrors(a);renderMatrix(a,MODEL_IDS);setStatus('Updated '+new Date().toLocaleTimeString(),'ok')}catch(e){setStatus(e.message,'err');$('accounts').textContent='Could not load accounts.';banner('Auth failed: '+e.message+' - check that the key matches FREEBUFF_API_KEY.')}}
+function renderUsage(u){var req=u.requests||0,ok=u.successes||0,err=u.errors||0;var sr=req?(ok/req):0,er=req?(err/req):0;var d=u.days||[];var prev=d.length>1?d[1].requests:null;var cur=d.length?d[0].requests:req;var cards=[['Requests',req,deltaChip(cur,prev)],['Success rate',fmtPct(sr),''],['Error rate',fmtPct(er),''],['Input chars',u.input_characters,''],['Output chars',u.output_characters,''],['Uptime',fmtDur(u.uptime_seconds),'']];$('usage').innerHTML=cards.map(function(x){return '<div class="card"><b>'+esc(x[1])+'</b><span>'+esc(x[0])+'</span>'+x[2]+'</div>'}).join('');var rows=Object.keys(u.by_model||{}).map(function(m){var v=u.by_model[m];return '<tr><td><code>'+esc(m)+'</code></td><td class="num">'+v.requests+'</td><td class="num">'+v.successes+'</td><td class="num">'+v.errors+'</td></tr>'}).join('');$('byModel').innerHTML=rows?'<table><thead><tr><th>Model</th><th class="num">Requests</th><th class="num">OK</th><th class="num">Errors</th></tr></thead><tbody>'+rows+'</tbody></table>':'<p class="muted">No requests yet.</p>';$('usageTime').textContent='('+u.version+')'}
+function fillChartSelect(bdm){var ids=MODEL_IDS.length?MODEL_IDS:Object.keys(bdm||{});var cur=$('chartModel').value;var opts=['<option value="all">all models</option>'].concat(ids.map(function(id){return '<option value="'+esc(id)+'">'+esc(id)+'</option>'}));$('chartModel').innerHTML=opts.join('');$('chartModel').value=(cur&&ids.indexOf(cur)>=0)?cur:'all'}
+function renderChart(days,bdm){LAST_DAYS=days;LAST_BDM=bdm;drawChart(days,bdm,$('chartModel').value)}
+function drawChart(days,bdm,sel){var el=$('chart');if(!days||!days.length){el.innerHTML='<p class="muted">No daily data yet.</p>';return}var vals=days.map(function(d){if(sel&&sel!=='all'&&bdm&&bdm[d.date]){var m=bdm[d.date][sel];return m?m.requests:0}return d.requests});var max=1;vals.forEach(function(v){if(v>max)max=v});var w=560,h=120,pad=4,bw=Math.max(4,(w-pad*2)/Math.max(vals.length,1)-2);var bars=vals.map(function(v,i){var bh=Math.round((v/max)*(h-24));var x=pad+i*(bw+2);var y=h-20-bh;return '<rect x="'+x+'" y="'+y+'" width="'+bw+'" height="'+bh+'" rx="1" fill="var(--accent)" style="animation-delay:'+(i*25)+'ms"><title>'+days[i].date+': '+v+' requests</title></rect>'}).join('');var labels=days.map(function(d,i){var x=pad+i*(bw+2);return '<text x="'+x+'" y="'+(h-6)+'" font-size="11" fill="var(--muted)">'+d.date.slice(5)+'</text>'}).join('');el.innerHTML='<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:auto">'+bars+labels+'</svg>'}
+function chartSel(){drawChart(LAST_DAYS||[],LAST_BDM||{},$('chartModel').value)}
+function sparkline(days){if(!days||!days.length)return '<span class="muted">-</span>';var max=1;days.forEach(function(d){if(d.requests>max)max=d.requests});var bars=days.slice(0,14).map(function(d){var hh=Math.max(2,Math.round((d.requests/max)*20));var cls=d.errors>0?(d.errors>=d.requests?'err':'warn'):'';return '<i class="'+cls+'" style="height:'+hh+'px" title="'+d.date+': '+d.requests+' req, '+d.errors+' err"></i>'}).join('');return '<span class="spark">'+bars+'</span>'}
+function resetTime(){var now=new Date();var next=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()+1));var diff=next-now;var h=Math.floor(diff/3600000),m=Math.floor(diff%3600000/60000);return (h<10?'0'+h:h)+':'+(m<10?'0'+m:m)}
+function renderKeys(keys){var el=$('keys');if(!keys||!keys.length){el.innerHTML='<p class="muted">No keys configured.</p>';return}var rt=resetTime();var rows=keys.map(function(k){var lim=k.limit?'daily limit '+k.limit:'unlimited';var res=k.limit?'<span class="muted">resets '+rt+' UTC</span>':'';return '<tr><td><code>'+esc(k.prefix)+'&hellip;</code></td><td>'+esc(lim)+'</td><td class="num">'+k.today_requests+'</td><td class="num">'+k.today_successes+'</td><td class="num">'+k.today_errors+'</td><td>'+sparkline(k.days)+'</td><td>'+res+'</td></tr>'}).join('');el.innerHTML='<table><thead><tr><th>Key</th><th>Limit</th><th class="num">Req today</th><th class="num">OK</th><th class="num">Err</th><th>14d</th><th>Reset</th></tr></thead><tbody>'+rows+'</tbody></table>'}
+function renderAccounts(a){var rows=a.accounts.map(function(x){var st=x.alive===true?'<span class="pill ok">alive</span>':x.alive===false?'<span class="pill bad">invalid</span>':'<span class="pill unk">unknown</span>';var lu=x.last_used_at?new Date(x.last_used_at).toLocaleTimeString():'<span class="muted">-</span>';var le=x.last_error?esc(x.last_error)+' <span class="muted">('+((x.last_error_at||'').slice(5,19).replace('T',' '))+')</span>':'<span class="muted">-</span>';return '<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc(x.uid||'-')+'</td><td class="num">'+(x.requests||0)+'</td><td>'+lu+'</td><td>'+le+'</td></tr>'}).join('');$('accounts').innerHTML='<table><thead><tr><th>Account</th><th>Status</th><th>UID</th><th class="num">Req</th><th>Last used</th><th>Last error</th></tr></thead><tbody>'+rows+'</tbody></table>'}
+function qcell(v){if(!v||v.used==null||v.limit==null)return '<span class="qcell">- / -</span>';var ratio=v.limit>0?v.used/v.limit:0;var cls=ratio>=1?'exh':ratio>=0.8?'warn':'ok';return '<span class="qcell '+cls+'" title="'+(v.limit-v.used)+' remaining">'+v.used+' / '+v.limit+'</span>'}
+function renderMatrix(a,modelIds){var el=$('quotaMatrix');var accts=a.accounts||[];var models=modelIds&&modelIds.length?modelIds:[];if(!models.length){var seen={};accts.forEach(function(x){Object.keys(x.quota||{}).forEach(function(m){seen[m]=1})});models=Object.keys(seen)}if(!accts.length){el.innerHTML='<p class="muted">No accounts.</p>';return}var head='<thead><tr><th>Account</th>'+models.map(function(m){return '<th title="'+esc(m)+'">'+esc(m.replace(/^.*\\//,''))+'</th>'}).join('')+'</tr></thead>';var body=accts.map(function(x){var q=x.quota||{};return '<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td>'+models.map(function(m){return '<td>'+qcell(q[m])+'</td>'}).join('')+'</tr>'}).join('');el.innerHTML='<table>'+head+'<tbody>'+body+'</tbody></table>'}
+function renderAcctErrors(a){var el=$('acctErrors');var rows=[];(a.accounts||[]).forEach(function(x){var es=x.last_errors||[];es.forEach(function(e){var st=e.status?'<span class="pill '+(e.status>=500?'bad':e.status>=400?'warn':'ok')+'">'+e.status+'</span>':'<span class="pill unk">?</span>';rows.push('<tr><td><code>'+esc(x.token_prefix)+'&hellip;</code></td><td>'+st+'</td><td>'+esc((e.time||'').slice(5,19).replace('T',' '))+'</td><td>'+esc(e.message||'')+'</td></tr>')})});el.innerHTML=rows.length?'<table><thead><tr><th>Account</th><th>Status</th><th>Time</th><th>Message</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>':'<p class="muted">No recorded errors.</p>'}
+async function loadModels(){try{var m=await (await fetch('/admin/models')).json();STORE_MODELS=m.data;MODEL_IDS=m.data.map(function(x){return x.id});renderModels(m.data)}catch(e){$('models').textContent='Models load failed: '+e.message}}
+function renderModels(list){$('models').innerHTML='<table><thead><tr><th>API model id</th><th>Upstream agent</th><th>State</th><th></th></tr></thead><tbody>'+list.map(function(x){var pill=x.disabled?'<span class="pill bad">disabled</span>':'<span class="pill ok">enabled</span>';var btn=x.disabled?'<button class="ghost small" onclick="toggleModel(\\''+esc(x.id)+'\\',false)">Enable</button>':'<button class="ghost small" onclick="toggleModel(\\''+esc(x.id)+'\\',true)">Disable</button>';return '<tr><td><code>'+esc(x.id)+'</code></td><td><code>'+esc(x.agent)+'</code></td><td>'+pill+'</td><td>'+btn+'</td></tr>'}).join('')+'</tbody></table>'}
+async function toggleModel(id,disabled){try{var r=await fetch('/admin/models/toggle',{method:'POST',headers:Object.assign(authHeaders(),{'content-type':'application/json'}),body:JSON.stringify({model:id,disabled:disabled})});var j=await r.json();if(!r.ok){throw Error((j.error&&j.error.message)||('HTTP '+r.status))}STORE_MODELS=null;MODEL_IDS=(j.data||[]).map(function(x){return x.id});renderModels(j.data||[]);setStatus('Model '+id+' '+(disabled?'disabled':'enabled'),'ok')}catch(e){setStatus(e.message,'err')}}
+function csvEscape(s){s=String(s==null?'':s);return s.indexOf('"')>=0||s.indexOf(',')>=0?'"'+s.replace(/"/g,'""')+'"':s}
+function exportCsv(){var u=LAST_USAGE;if(!u){setStatus('Load data first','err');return}var lines=['date,requests,successes,errors,input_chars,output_chars'];(u.days||[]).forEach(function(d){lines.push([d.date,d.requests,d.successes,d.errors,d.inputChars||0,d.outputChars||0].join(','))});lines.push('');lines.push('model,requests,successes,errors');Object.keys(u.by_model||{}).forEach(function(m){var v=u.by_model[m];lines.push([csvEscape(m),v.requests,v.successes,v.errors].join(','))});lines.push('');lines.push('key,limit,today_requests');(u.keys||[]).forEach(function(k){lines.push([csvEscape(k.prefix),k.limit||'',k.today_requests].join(','))});var blob=new Blob([lines.join(String.fromCharCode(10))],{type:'text/csv'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='freebuff2api-usage.csv';document.body.appendChild(a);a.click();a.remove();setStatus('CSV downloaded','ok')}
+boot();loadModels();
 </script>`;
 }function adminPageResponse() {
   return new Response(pageShell("freebuff2api console - admin", adminBody()), { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders() } });
@@ -454,6 +548,12 @@ function adminStatus(env) {
     accounts: parseAccounts(env).length,
     models: MODELS.length,
     key_count: parseApiKeys(env).length,
+    store_backend: storeBackendLabel,
+    last_flush_at: lastFlushAt ? new Date(lastFlushAt).toISOString() : null,
+    alerts: {
+      webhook: !!(env.FREEBUFF_ALERT_WEBHOOK || "").trim(),
+      telegram: !!((env.FREEBUFF_TG_BOT_TOKEN || "").trim() && (env.FREEBUFF_TG_CHAT_ID || "").trim()),
+    },
     default_model: defaultModel(env),
     uptime_seconds: Math.floor((Date.now() - usageStats.started) / 1000),
     time: new Date().toISOString(),
@@ -1732,12 +1832,14 @@ function defaultModel(env) {
 
 // --- storage backend: Deno KV (Deno Deploy) -> env.FREEBUFF_KV (Cloudflare) -> in-memory fallback ---
 let storePromise = null;
+let storeBackendLabel = "memory"; // deno_kv | cf_kv | memory (set when the store initializes)
 function getStore(env) {
   if (!storePromise) {
     storePromise = (async () => {
       if (typeof Deno !== "undefined" && Deno.openKv) {
         try {
           const kv = await Deno.openKv();
+          storeBackendLabel = "deno_kv";
           return {
             sum: async (key, n) => { if (n) await kv.atomic().sum(key, n).commit(); },
             get: async (key) => (await kv.get(key)).value ?? null,
@@ -1749,6 +1851,7 @@ function getStore(env) {
       }
       if (env && env.FREEBUFF_KV && typeof env.FREEBUFF_KV.get === "function") {
         const kvns = env.FREEBUFF_KV;
+        storeBackendLabel = "cf_kv";
         // Percent-encode each component: model ids contain '/' and key hashes are hex,
         // so a bare join/split on '/' would corrupt keys (KV-003 / CodeReviewer P1).
         const k = (key) => key.map((p) => encodeURIComponent(String(p))).join("/");
@@ -1918,17 +2021,7 @@ function restoreDelta(key, n) {
   } catch {}
 }
 
-async function readDays(s, n) {
-  const byDate = new Map();
-  for (const e of await s.list(["usage", "day"])) {
-    if (e.key.length !== 4 || e.key[3] === "model" || e.key[3] === "key") continue;
-    const date = String(e.key[2]);
-    let d = byDate.get(date);
-    if (!d) { d = { date, requests: 0, successes: 0, errors: 0, inputChars: 0, outputChars: 0 }; byDate.set(date, d); }
-    d[e.key[3]] = (d[e.key[3]] || 0) + e.value;
-  }
-  return [...byDate.values()].sort((a, b) => b.date.localeCompare(a.date)).slice(0, n);
-}
+
 
 // --- API keys: FREEBUFF_API_KEYS="key1:100,key2" (key:limit, limit = daily request cap) ---
 function parseApiKeys(env) {

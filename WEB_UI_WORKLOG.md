@@ -94,6 +94,20 @@ Two review agents (code + security) ran against the v1.8.0 surface. All actionab
   env default model, dead-account alert via chat 401 + cooldown dedupe + silent /healthz
   (ABUSE-001), accounts history, client JS in `vm` sandbox (boot/loadAll/chart/toggleModel/landing curl).
 
+## UI upgrade (v1.8.1, 2026-08-10) — terminal-themed dashboard
+
+Design (agent-researched, WCAG-verified): **Catppuccin Mocha** palette (bg `#1e1e2e`, accent teal `#94e2d5`, status green/yellow/red from the family), **IBM Plex Mono** single family (Google Fonts link in pageShell), base type 14→15px, card numbers 26px, radius 3px, signature = terminal prompt header `$ freebuff2api█` with blinking block cursor, bar-grow chart animation (all `prefers-reduced-motion` guarded).
+
+New dashboard features (from agent brainstorm, all additive to existing responses — no new routes):
+- Health cards: success/error rate + day-over-day delta chips (client-side from `days`)
+- Traffic chart with **per-model selector** (server now returns `by_day_model`, the KV space that was written but never read)
+- Per-key table: today counters + 14-day **sparkline** + UTC reset countdown for limited keys (`keys[].days`)
+- **Quota matrix** (account × model, used/limit, ok/warn/exhaust coloring) — client-side
+- Account error timeline (`last_errors` array added to `/admin/accounts`)
+- CSV export button (client-side from `/admin/usage`)
+- Header badges: `store: deno_kv|cf_kv|memory` + flush health + alert channels (`adminStatus` additive fields)
+- `readDays` removed (inlined into handleAdminUsage single KV pass)
+
 ## Live status (2026-08-10, DEPLOYED)
 
 - **v1.8.0 CANLI**: `https://freebuff2api-prod.hknerdr.deno.net`
