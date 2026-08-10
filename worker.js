@@ -288,13 +288,12 @@ async function handleAdminUsage(env) {
   const byDayModelTrim = {};
   for (const date of Object.keys(byDayModel)) if (daySet.has(date)) byDayModelTrim[date] = byDayModel[date];
   const hours = {};
-  for (const e of dayItems) {
-    if (e.key.length !== 5 || e.key[3] === "model" || e.key[3] === "key") continue;
+  for (const e of await s.list(["usage", "hour"])) {
+    if (e.key.length !== 5) continue;
     const date = String(e.key[2]);
     if (!daySet.has(date)) continue;
-    const hh = String(e.key[3]);
     const hd = hours[date] = hours[date] || {};
-    const row = hd[hh] = hd[hh] || { requests: 0, successes: 0, errors: 0 };
+    const row = hd[String(e.key[3])] = hd[String(e.key[3])] || { requests: 0, successes: 0, errors: 0 };
     row[e.key[4]] = (row[e.key[4]] || 0) + e.value;
   }
   for (const [k, v] of usageStats.byHour) {
