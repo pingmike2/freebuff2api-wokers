@@ -25,6 +25,10 @@ Optional configuration (all env vars):
 | `FREEBUFF_ALERT_WEBHOOK` | URL receiving `{"text": ...}` JSON when an account is detected dead (fires on authenticated account probes and chat 401/403 responses — not on the public `/healthz` path). |
 | `FREEBUFF_TG_BOT_TOKEN` + `FREEBUFF_TG_CHAT_ID` | Telegram fallback for the same dead-account alerts. |
 | `FREEBUFF_DEBUG` | `true` enables per-request upstream logging. |
+| `FREEBUFF_MODEL_LIMITS` | Model daily caps: `model1:50,model2:5` (429 when exhausted). |
+| `FREEBUFF_KEY_MODELS` | Key → model allowlist: `key1:modelA,modelB;key2:modelC` (unlisted keys unrestricted). |
+| `FREEBUFF_ALERT_ERR_RATE` | Error-rate alert threshold (default `0.2`, checked on admin reads). |
+| `FREEBUFF_ALERT_QUOTA` | Quota-% alert threshold (default `0.9`). |
 
 ### Anthropic client example
 
