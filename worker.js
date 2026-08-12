@@ -1,7 +1,7 @@
 const CODEBUFF_API = "https://www.codebuff.com";
 const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
 const DEFAULT_API_KEY = "freebuff-default-key";
-const VERSION = "1.8.8";
+const VERSION = "1.8.8.1";
 const CONTEXT_PRUNER_AGENT = "context-pruner";
 
 // 动态模型注册表：从官方 freebuff 镜像拉取模型清单
@@ -834,8 +834,79 @@ async function fetchStreamWithQuotaGuard(url, init, token, sessionModel) {
 // session 生命周期
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 正常客户端行为层（v1.8.8.1，源码依据：官方 cli/src/hooks/use-gravity-ad.ts、
+// cli/src/utils/fingerprint.ts、sdk/src/impl/llm.ts）
+//   - 稳定指纹：每个 Worker（账号）一个永不变化的 fingerprintId（enhanced- 前缀，
+//     官方用硬件序列号/MAC/机器ID 哈希；CF 无硬件，用 token 派生稳定哈希即可，
+//     关键是"同一账号永远同一指纹"）
+//   - 广告链：官方免费推理靠广告（源码注释原话），每次会话前 POST /ads 拉取 +
+//     POST /ads/impression 上报曝光，失败静默
+//   - usage 触碰：官方客户端启动会查 /api/v1/usage，补上让调用面更完整
+// ---------------------------------------------------------------------------
+const BEHAVIOR_CACHE_TTL_MS = 30 * 60 * 1000; // 30 分钟
+const behaviorCache = new Map(); // key -> ts
+
+function behaviorDue(key) {
+  const ts = behaviorCache.get(key) || 0;
+  if (Date.now() - ts > BEHAVIOR_CACHE_TTL_MS) {
+    behaviorCache.set(key, Date.now());
+    return true;
+  }
+  return false;
+}
+
+// 稳定指纹：token 派生，同一账号永远一致（官方 enhanced- 前缀 + 哈希）
+// CF Workers 无同步 WebCrypto，用轻量确定性哈希（FNV-1a 双种子 + hex）
+function stableFingerprint(token) {
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  const s = "freebuff-fp-v2:" + token;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
+  }
+  return "enhanced-" + h1.toString(16).padStart(8, "0") + h2.toString(16).padStart(8, "0");
+}
+
+// 广告链：POST /ads 拉取 → 若有 impUrl 则 POST /ads/impression 上报曝光。
+// 官方实现：getCliAdRequestUserAgent 发 Freebuff-CLI/<version> UA；
+// body {provider:"gravity", surface, sessionId, device, userAgent}；曝光 {impUrl, mode}
+async function runNormalClientBehavior(token, clientFingerprint) {
+  const failures = [];
+  // 1) 广告拉取 + 曝光（每 30 分钟一次，避免每个请求都打广告接口）
+  if (behaviorDue("ads:" + token)) {
+    try {
+      const ad = await enqueueUp("POST", "/api/v1/ads", token, {
+        provider: "gravity",
+        sessionId: crypto.randomUUID(),
+        surface: "waiting_room",
+        device: { os: "macos", timezone: "Asia/Shanghai", locale: "zh-CN" },
+        userAgent: "Freebuff-CLI/0.0.138",
+      }, { "User-Agent": "Freebuff-CLI/0.0.138", "Content-Type": "application/json" }, 6000);
+      const impUrl = ad.data && Array.isArray(ad.data.ads) && ad.data.ads[0] && ad.data.ads[0].impUrl;
+      if (ad.status === 200 && impUrl) {
+        await enqueueUp("POST", "/api/v1/ads/impression", token,
+          { impUrl, mode: "free" },
+          { "User-Agent": "Freebuff-CLI/0.0.138", "Content-Type": "application/json" }, 6000);
+      }
+    } catch (e) { failures.push("ads:" + String(e && e.message || e).slice(0, 80)); }
+  }
+  // 2) usage 触碰（30 分钟一次）
+  if (behaviorDue("usage:" + token)) {
+    try {
+      await enqueueUp("POST", "/api/v1/usage", token,
+        { fingerprintId: clientFingerprint },
+        { "Content-Type": "application/json" }, 6000);
+    } catch (e) { failures.push("usage:" + String(e && e.message || e).slice(0, 80)); }
+  }
+  return failures;
+}
+
 async function createSession(token, sessionModel, forceCreate = false) {
-  // 0) 缓存命中且未过期（剩 >60s）直接复用，避免每次请求都打上游 session 接口
+  // 0) 正常客户端行为：广告链 + usage 触碰（30 分钟节流，失败静默）
+  try { await runNormalClientBehavior(token, stableFingerprint(token)); } catch {}
+  // 1) 缓存命中且未过期（剩 >60s）直接复用，避免每次请求都打上游 session 接口
   if (!forceCreate) {
     const cached = sessCache.get(token + ":" + sessionModel);
     if (isUsableSession(cached)) {
@@ -1018,6 +1089,8 @@ function buildUpstreamPayload(params, mc, sess, runId) {
     freebuff_instance_id: sess.instanceId,
     trace_session_id: crypto.randomUUID(),
     run_id: runId,
+    // 官方 SDK：client_id = clientSessionId（会话级稳定标识），不是随机数
+    client_id: stableFingerprint(runId || "session"),
     cost_mode: "free",
   };
   return payload;

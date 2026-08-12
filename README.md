@@ -5,8 +5,9 @@
 > 🎉 欢迎使用与交流！有任何问题或想法欢迎提 Issue / PR。
 > 开源协议：**[MIT](#-license)**
 
-把 **freebuff/codebuff** 的免费模型暴露成 **OpenAI-compatible API** 的 Cloudflare Worker。
-单文件无依赖，**推荐在 CF 控制台直接粘贴代码部署**，适配任意 OpenAI SDK / 客户端（QwenPaw、Hermes、ChatGPT-Next-Web、LobeChat、one-api 等）。
+把 **freebuff/codebuff** 的免费模型暴露成 **OpenAI-compatible API**。单文件无依赖，**推荐 Docker 容器部署**（或自建 VPS 运行），适配任意 OpenAI SDK / 客户端（QwenPaw、Hermes、ChatGPT-Next-Web、LobeChat、one-api 等）。
+
+> ⚠️ **部署方式重要提示**：Freebuff 官方已检测 Cloudflare Worker 部署（识别 `cf-worker` / `cf-ray` 等边缘标记），**在 CF 上部署会显著增加账号被封禁的风险**。因此本项目**不推荐 Cloudflare 部署**，推荐使用 **Docker 容器**或自建 VPS 运行（见下方「[🐳 Docker 容器化部署](#-docker-容器化部署)」）。
 
 ## ✨ 特性
 
@@ -18,7 +19,7 @@
 - 🧩 **OpenAI 兼容**：`/v1/models`、`/v1/chat/completions`、`/v1/responses`（流式/非流式视接口支持情况而定）
 - 📨 **Anthropic Messages API**：支持 `/v1/messages`、`/messages` 及对应的 `count_tokens` 路由，可供 Anthropic SDK / 兼容客户端尝试接入
 - ❤️ **健康检查**：`GET /healthz`（免鉴权），方便监控探活
-- 📦 **单文件部署**：无依赖，CF 控制台粘贴即用
+- 📦 **单文件部署**：无依赖，`worker.js` 一处代码，CF / Docker / VPS 通用
 
 ## 📨 Anthropic Messages API 支持
 
@@ -59,12 +60,12 @@ Worker 通过 Cloudflare Workers 访问 Freebuff，上游通常会将请求识�
 ## 🚀 快速开始
 
 1. 获取 freebuff token（见下方「获取 FREEBUFF_TOKEN」）
-2. 部署 worker（见下方「部署」，**推荐 CF 控制台粘贴**）
-3. 在 CF 后台设置变量：
+2. 部署服务（见下方「部署」，**推荐 Docker 容器部署**）
+3. 配置环境变量：
    - `FREEBUFF_TOKEN`（必需）= 你的 token
    - `FREEBUFF_API_KEY`（可选）= 自定义访问 key，缺省 `freebuff-default-key`
 4. 用任意 OpenAI 客户端连接：
-   - **Base URL**: `https://你的worker名.你的子域.workers.dev/v1`
+   - **Base URL**: `http://localhost:8877/v1`（Docker 部署）或 `https://你的worker名.你的子域.workers.dev/v1`（CF 部署，不推荐）
    - **API Key**: `<FREEBUFF_API_KEY 的值>`
 
 > 🌐 **自定义域名**：如果 `*.workers.dev` 域名访问不通（部分地区被墙/受限），可给 Worker 绑定自己的域名，Base URL 改为 `https://你的域名/v1`。配置方法见下方「[自定义域名](#-自定义域名)」。
@@ -130,9 +131,52 @@ python3 extract_freebuff.py chat "你好"      # 发一条消息测试模型 API
 
 ## 🛠️ 部署
 
-worker 是**单文件**（`worker.js`），推荐使用 CF 控制台直接部署：
+### 🐳 Docker 容器化部署（✅ 推荐）
 
-### 方式 A：CF 控制台粘贴代码（✅ 推荐）
+> 适合本地/NAS/VPS 长期运行：不受 Cloudflare Workers 限制，**不会暴露 CF 边缘标记**（`cf-worker` / `cf-ray`），账号封禁风险显著低于 CF 部署；同一套代码也可在 CF 运行（不推荐）。
+
+**快速部署：**
+
+```bash
+# 1. 准备目录，复制以下文件：worker.js server.js package.json Dockerfile docker-compose.yml
+mkdir freebuff2api && cd freebuff2api
+
+# 2. 配置 .env（API key + 可选 RELAY_KEY）
+cat > .env <<'EOF'
+FREEBUFF_API_KEY=your-api-key
+RELAY_KEY=
+EOF
+
+# 3. 账号凭据：credentials/ 下每个账号一个 json（server.js 读取 authToken 字段）
+mkdir -p credentials
+# credentials/<任意名>.json = {"email": "...", "authToken": "...", "name": "..."}
+
+# 4. 启动
+chmod 600 .env credentials/*.json
+docker compose up -d --build
+```
+
+启动后监听 `0.0.0.0:8787`（compose 映射到宿主机 `8877`），Base URL 为 `http://localhost:8877/v1`。
+
+**环境变量：**
+
+| 变量 | 说明 |
+|---|---|
+| `PORT` / `HOST` | 监听端口/地址，默认 `8787` / `0.0.0.0` |
+| `FREEBUFF_API_KEY` | 本 API 访问 key（缺省 `freebuff-default-key`） |
+| `FREEBUFF_DEBUG` | `true` 开启请求级调试日志 |
+| `CODEBUFF_API` | 上游地址，默认空=直连 `https://www.codebuff.com`；走自建中继时设为中继域名 |
+| `RELAY_KEY` | 中继密钥（`CODEBUFF_API` 指向带鉴权的中继时必填） |
+
+> ⚠️ 容器内 `credentials/` 以只读方式挂载；`server.js` 启动时读取并组装 `FREEBUFF_TOKEN`（多账号逗号分隔）。
+
+### Cloudflare Worker 部署（❌ 不推荐）
+
+> **Freebuff 官方已检测 Cloudflare Worker 部署**（识别 `cf-worker` / `cf-ray` 等边缘标记，源码中已点名类似本项目的代理模式）。在 CF 上部署会显著增加账号被封禁的风险，**不推荐作为主要部署方式**；以下步骤仅保留给熟悉风险的用户参考。
+
+worker 是**单文件**（`worker.js`），如仍需在 CF 部署：
+
+### 方式 A：CF 控制台粘贴代码
 
 最简单可控，不依赖本地环境、不关联 GitHub：
 
@@ -151,7 +195,7 @@ worker 是**单文件**（`worker.js`），推荐使用 CF 控制台直接部署
    ```bash
    curl https://你的worker.workers.dev/healthz          # 健康检查（无需 key）
    curl https://你的worker.workers.dev/v1/models \
-     -H "Authorization: Bearer <你的API_KEY>"           # 模型列表
+     -H "Authorization: Bearer ***"           # 模型列表
    ```
 
 > 每次改代码只需重复第 3 步：编辑代码 → 粘贴新内容 → 部署。**不推荐关联 GitHub 自动部署**（见下文）。
@@ -166,7 +210,7 @@ worker 是**单文件**（`worker.js`），推荐使用 CF 控制台直接部署
 - secrets 与分支状态容易混乱，出问题不好排查
 - 本仓库含 token 提取脚本，自动同步增加暴露面
 
-**推荐做法**：本地改代码 → 手动粘贴到 CF 控制台 → 自己点部署，完全可控。
+**推荐做法**：本地改代码 → Docker 容器/自建 VPS 部署，或（了解风险的前提下）手动粘贴到 CF 控制台 → 自己点部署，完全可控。
 
 > 免费模型对出口 IP 有 US 限制，Cloudflare Workers 默认美国出口，无需额外配置。
 

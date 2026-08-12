@@ -5,6 +5,8 @@ test/worker_tmp.mjs
 # 凭证/token 文件，绝不提交
 freebuff_tools/freebuff_credentials.json
 **/freebuff_credentials.json
+# Docker 容器凭据目录，绝不提交
+credentials/
 __pycache__/
 test/
 
