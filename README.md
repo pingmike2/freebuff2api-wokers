@@ -222,6 +222,15 @@ docker compose pull && docker compose up -d   # 拉新镜像并重建
 docker compose restart                        # 或仅重启（自动拉最新 worker.js）
 ```
 
+> 💡 **如何确认实际运行的版本**：由于镜像 tag 与容器内实际代码是脱钩的（tag 只代表镜像构建时间，运行时代码以启动时拉取的 `worker.js` 为准），**镜像 tag 不是版本号**。要确认当前实际运行的版本，直接查免鉴权的健康检查端点：
+>
+> ```bash
+> curl -s http://localhost:8877/healthz
+> # 返回体中的 "version" 字段即容器内 worker.js 的真实版本
+> ```
+>
+> 返回的 `version` 字段才是容器内 `worker.js` 的真实版本，与 `docker images` 显示的 tag 无关。若担心容器因拉取失败回退到了镜像内置的旧副本，用上面的命令核对即可（比如镜像 tag 是 1.7.0，但 healthz 返回 `"version":"1.8.9"` 就说明容器已自动更新到最新）。
+
 #### 环境变量
 
 | 变量 | 说明 |
