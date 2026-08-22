@@ -1814,6 +1814,7 @@ async function streamToNonStream(upstreamBody, upstreamModel) {
   const reader = upstreamBody.getReader();
   const decoder = new TextDecoder();
   let buf = "", content = "", reasoning = "", finishReason = null, model = "", id = "", usage = null;
+  const toolCalls = new Map(); // 上游 tool_calls index -> {id, name, arguments}
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -1831,6 +1832,19 @@ async function streamToNonStream(upstreamBody, upstreamModel) {
         const delta = choice.delta || {};
         if (delta.content) content += delta.content;
         if (delta.reasoning_content) reasoning += delta.reasoning_content;
+        // 工具调用增量（chat 格式 delta.tool_calls[]）
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            if (!tc || typeof tc !== "object") continue;
+            const ti = tc.index ?? 0;
+            let item = toolCalls.get(ti);
+            if (!item) { item = { id: "", name: "", arguments: "" }; toolCalls.set(ti, item); }
+            if (tc.id) item.id = tc.id;
+            const fn = tc.function || {};
+            if (fn.name && !item.name) item.name = fn.name;
+            if (fn.arguments) item.arguments += fn.arguments;
+          }
+        }
         if (choice.finish_reason) finishReason = choice.finish_reason;
         if (obj.id) id = obj.id;
         if (obj.model) model = obj.model;
@@ -1839,6 +1853,13 @@ async function streamToNonStream(upstreamBody, upstreamModel) {
     }
   }
   const msg = { role: "assistant", content };
+  if (toolCalls.size) {
+    msg.tool_calls = [...toolCalls.entries()].sort((x, y) => x[0] - y[0]).map(([, v]) => ({
+      id: v.id || ("call_" + Math.random().toString(36).slice(2, 10)),
+      type: "function",
+      function: { name: v.name, arguments: v.arguments },
+    }));
+  }
   if (reasoning && !content) { msg.content = reasoning; msg.reasoning_used_as_content = true; }
   else if (reasoning) msg.reasoning_content = reasoning;
   return {
