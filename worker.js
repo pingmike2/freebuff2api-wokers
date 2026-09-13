@@ -386,6 +386,24 @@ function isPausedModel(modelId) {
 // ---------------------------------------------------------------------------
 const DESKTOP_INCLUDE_RATE_LIMITS = { "x-freebuff-include-unused-rate-limits": "1" };
 
+// ---------------------------------------------------------------------------
+// 鉴权失败限流：按来源 IP 限制单位时间内的失败 Bearer token 尝试次数，
+// 防止暴力破解 API key（无限次尝试穷举有效凭据）。
+// ---------------------------------------------------------------------------
+const authAttempts = new Map(); // ip -> { count, resetAt }
+const AUTH_RATE_LIMIT = 20;        // 每个 IP 每个窗口允许的最大失败次数
+const AUTH_RATE_WINDOW_MS = 60000; // 限流窗口：1 分钟
+
+function isAuthRateLimited(ip) {
+  const now = Date.now();
+  const rec = authAttempts.get(ip);
+  if (!rec || now > rec.resetAt) {
+    authAttempts.set(ip, { count: 1, resetAt: now + AUTH_RATE_WINDOW_MS });
+    return false;
+  }
+  rec.count++;
+  return rec.count > AUTH_RATE_LIMIT;
+}
 
 export default {
   async fetch(request, env) {
@@ -404,6 +422,11 @@ export default {
         health_source: "worker_cache",
         time: new Date().toISOString(),
       }, 200);
+    }
+
+    const clientIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || "unknown";
+    if (isAuthRateLimited(clientIp)) {
+      return jsonResponse({ error: { message: "Too many authentication attempts, please try again later", type: "rate_limit_error" } }, 429);
     }
 
     const key = getApiKey(request, env);
