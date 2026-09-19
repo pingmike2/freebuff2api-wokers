@@ -386,6 +386,24 @@ function isPausedModel(modelId) {
 // ---------------------------------------------------------------------------
 const DESKTOP_INCLUDE_RATE_LIMITS = { "x-freebuff-include-unused-rate-limits": "1" };
 
+// ---------------------------------------------------------------------------
+// API key 鉴权限流：按来源 IP 限制失败尝试次数，防止暴力破解 API key。
+// ---------------------------------------------------------------------------
+const AUTH_FAIL_LIMIT = 10;
+const AUTH_FAIL_WINDOW_MS = 60 * 1000;
+const authFailures = new Map(); // ip -> { count, windowStart }
+
+function isAuthRateLimited(request) {
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  const now = Date.now();
+  const rec = authFailures.get(ip);
+  if (!rec || now - rec.windowStart > AUTH_FAIL_WINDOW_MS) {
+    authFailures.set(ip, { count: 1, windowStart: now });
+    return false;
+  }
+  rec.count++;
+  return rec.count > AUTH_FAIL_LIMIT;
+}
 
 export default {
   async fetch(request, env) {
@@ -404,6 +422,10 @@ export default {
         health_source: "worker_cache",
         time: new Date().toISOString(),
       }, 200);
+    }
+
+    if (isAuthRateLimited(request)) {
+      return jsonResponse({ error: { message: "Too many authentication attempts, please try again later", type: "rate_limit_error" } }, 429);
     }
 
     const key = getApiKey(request, env);
