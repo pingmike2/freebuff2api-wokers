@@ -604,6 +604,16 @@ This project learned from and references the following open-source projects:
 - [freebuff](https://github.com/CodebuffAI/freebuff) — freebuff's official public source, studied for its protocol implementation and changelog.
 - [Argo-Nezha-Service-Container](https://github.com/fscarmen/Argo-Nezha-Service-Container) — the **container bootstrapper** pattern (the Dockerfile only bootstraps; business logic is driven by remote scripts/code). This project's Docker deployment borrows that design for "edit code = update, restart = apply" lightweight management.
 
+## Sponsors
+
+This project is supported by the following providers:
+
+| Sponsor | Support |
+|---|---|
+| [ForZTN](https://sponsorship.forztn.com/github.com/pingmike2/freebuff2api-wokers) | Free VPS and network resources |
+
+> Sponsorship does not influence feature design, implementation or protocol adaptation, and is not an endorsement of the third-party service. Thanks for supporting open source.
+
 ## Disclaimer
 
 This project is for **technical exchange and learning/research only**.

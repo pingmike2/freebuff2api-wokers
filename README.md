@@ -605,6 +605,16 @@ Worker 已自动处理以上全部生命周期，无需手动干预。另：syst
 - [freebuff](https://github.com/CodebuffAI/freebuff) —— freebuff 官方公开源码，本项目通过阅读其协议实现与更新日志进行学习研究。
 - [Argo-Nezha-Service-Container](https://github.com/fscarmen/Argo-Nezha-Service-Container) —— **容器引导器模式**（Dockerfile 只做引导，业务逻辑由远程脚本/代码驱动），本项目 Docker 部署方式借鉴了该设计，实现"改代码即更新、重启即生效"的轻量管理。
 
+## 🤝 赞助商
+
+本项目由以下服务商提供服务器 / 网络资源支持：
+
+| 赞助商 | 支持内容 |
+|---|---|
+| [ForZTN](https://sponsorship.forztn.com/github.com/pingmike2/freebuff2api-wokers) | 免费 VPS 与网络资源支持 |
+
+> 赞助不参与项目功能设计、代码实现与协议适配，也不代表对第三方服务的推荐。感谢支持开源。
+
 ## ⚠️ 免责声明
 
 本项目仅供**技术交流与学习研究**使用。
